@@ -843,13 +843,21 @@ def filter_description(description):
 # Обработка введенного описания объявления
 @dp.message_handler(state=UserState.AdDescription)
 async def process_ad_description(message: types.Message, state: FSMContext):
-    filtered_description = filter_description(message.text)  # Фильтруем текст
+    # Фильтруем текст на наличие запрещенных слов и контактной информации
+    filtered_description = filter_description(message.text)
 
-    async with state.proxy() as data:
-        data['description'] = filtered_description
+    # Проверяем длину фильтрованного описания
+    if len(filtered_description) > 1024:
+        # Если фильтрованное описание слишком длинное, просим пользователя ввести его заново
+        await message.answer("Описание слишком длинное. Пожалуйста, укоротите его до 1024 символов и попробуйте снова.")
+    else:
+        # Сохраняем корректное описание в состояние
+        async with state.proxy() as data:
+            data['description'] = filtered_description
 
-    await UserState.WaitForContact.set()
-    await message.answer("Введите контактную информацию:")
+        # Переводим пользователя к следующему шагу
+        await UserState.WaitForContact.set()
+        await message.answer("Введите контактную информацию:")
 
 @dp.message_handler(state=UserState.WaitForContact)
 async def process_contact_info(message: types.Message, state: FSMContext):
@@ -1028,6 +1036,12 @@ async def show_ad(user_id, ad, state: FSMContext):
     contact_info = contact if subscription_status and subscription_status[0] == 1 else "для просмотра контактов, необходимо\nприобрести подписку."
 
     message_text = f"Объявление ID: {ad_id}\nОписание: {description}\nКонтакт: {contact_info}"
+
+    # Проверка и сокращение длины подписи, если необходимо
+    if len(message_text) > 1024:
+        # Сокращаем текст, оставляя место для "..."
+        message_text = message_text[:1021] + "..."
+
     message = None
 
     if photos:
