@@ -97,9 +97,13 @@ async def register_user_if_not_exists(user_id: int, username: str = None):
                                  (user_id, username))
                 await db.commit()
 
-                # После регистрации пользователя отправляем сообщение в канал
-                message_text = f"🎉 Новый пользователь [id{user_id}] присоединился к боту!"
-                await bot.send_message(CHANNEL_ID, message_text, parse_mode=types.ParseMode.HTML)
+                # Формируем сообщение с учетом наличия username
+                if username:
+                    message_text = f"🎉 Новый пользователь [id{user_id}](https://t.me/{username}) присоединился к боту!"
+                else:
+                    message_text = f"🎉 Новый пользователь с ID {user_id} присоединился к боту!"
+                    
+                await bot.send_message(CHANNEL_ID, message_text, parse_mode=types.ParseMode.MARKDOWN)
 async def check_and_block_user_if_needed(user_id: int):
     async with aiosqlite.connect('my_database.db') as db:
         # Инкрементируем счётчик жалоб
@@ -136,7 +140,7 @@ async def check_inactivity():
                     await send_notification(user_id)
 
             # Ждем перед следующей проверкой
-            await asyncio.sleep(21600)
+            await asyncio.sleep(57600)
         except Exception as e:
             # Логируем любые ошибки и продолжаем цикл
             print(f"Ошибка при проверке неактивности: {e}")
@@ -1486,16 +1490,23 @@ async def handle_callback_query(callback_query: CallbackQuery):
 
 async def send_message_to_all_users():
     async with aiosqlite.connect('my_database.db') as db:  # Подключение к базе данных
-        async with db.execute("SELECT id FROM users") as cursor:  # Запрос к базе данных
+        # Запрос к базе данных для получения идентификатора пользователя и его username
+        async with db.execute("SELECT id, username FROM users") as cursor:
             async for row in cursor:
-                chat_id = row[0]
+                chat_id, username = row
                 markup = types.InlineKeyboardMarkup()
                 button = types.InlineKeyboardButton(text="Перезапустить", callback_data="clear_chat1")
                 markup.add(button)
                 try:
                     await bot.send_message(chat_id, "В боте произошло обновление. Чтобы воспользоваться новыми возможностями,\nпожалуйста, нажмите кнопку 'Перезапустить'.", reply_markup=markup)
                 except Exception as e:
-                    print(f"Не удалось отправить сообщение пользователю {chat_id}: {e}")
+                    # Проверяем, есть ли username для формирования ссылки на профиль
+                    if username:
+                        user_link = f"https://t.me/{username}"
+                        print(f"Не удалось отправить сообщение пользователю {chat_id} ({user_link}): {e}")
+                    else:
+                        print(f"Не удалось отправить сообщение пользователю {chat_id} (пользователь без username): {e}")
+
 async def on_startup(_):
     asyncio.create_task(check_inactivity())
     asyncio.create_task(send_message_to_all_users())
