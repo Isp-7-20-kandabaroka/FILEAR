@@ -34,17 +34,12 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.exceptions import MessageToDeleteNotFound, MessageCantBeDeleted, BadRequest
 
-
-
-
-
 from aiogram.types import Message
 
 subscription_start = datetime.now()
 # Создаем подключение к базе данных
 connection = sqlite3.connect('my_database.db')
 cursor = connection.cursor()
-
 
 # Список городов
 cities_list = [
@@ -55,7 +50,6 @@ cities_list = [
 
 # Словарь для отслеживания активности пользователя
 last_activity = {}
-
 
 # Сохраняем изменения и закрываем соединение
 connection.commit()
@@ -69,7 +63,9 @@ bot = Bot(token='6669399410:AAHWkE80Jqix61KmaXW-TQzqYw6bMZaFuhE')
 dp = Dispatcher(bot, storage=storage)
 
 CHANNEL_ID = -1002025346514
-ADMIN_IDS = [487242878]  # Замените на реальные ID администраторов
+ADMIN_IDS = [487242878,713476634]  # Замените на реальные ID администраторов
+
+
 class UserState(StatesGroup):
     AddCity = State()
     CitySelected = State()
@@ -102,8 +98,10 @@ async def register_user_if_not_exists(user_id: int, username: str = None):
                     message_text = f"🎉 Новый пользователь [id{user_id}](https://t.me/{username}) присоединился к боту!"
                 else:
                     message_text = f"🎉 Новый пользователь с ID {user_id} присоединился к боту!"
-                    
+
                 await bot.send_message(CHANNEL_ID, message_text, parse_mode=types.ParseMode.MARKDOWN)
+
+
 async def check_and_block_user_if_needed(user_id: int):
     async with aiosqlite.connect('my_database.db') as db:
         # Инкрементируем счётчик жалоб
@@ -119,11 +117,14 @@ async def check_and_block_user_if_needed(user_id: int):
         await db.commit()  # Важно помнить о коммите изменений
         return False  # Возвращаем False, если количество жалоб меньше 3
 
+
 async def update_last_activity(user_id: int):
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # Форматируем текущее время как строку
     async with aiosqlite.connect('my_database.db') as db:
         await db.execute("UPDATE users SET last_activity = ? WHERE id = ?", (now, user_id))
         await db.commit()
+
+
 async def check_inactivity():
     while True:
         try:
@@ -145,6 +146,7 @@ async def check_inactivity():
             # Логируем любые ошибки и продолжаем цикл
             print(f"Ошибка при проверке неактивности: {e}")
 
+
 def restart_button():
     # Создаем кнопку для перезапуска
     markup = InlineKeyboardMarkup()
@@ -153,44 +155,64 @@ def restart_button():
     return markup
 
 
-
 async def send_notification(user_id: int):
     try:
         # Используем user_id как chat_id для отправки сообщения
         await bot.send_message(user_id,
-                               "Вы были неактивны в течение последних 6 часов.\nНажмите на кнопку перезапустить ниже\nчтобы продолжить пользоваться функциями бота.",
+                               "Вы были неактивны в течение последних 16 часов.\nНажмите на кнопку перезапустить ниже\nчтобы продолжить пользоваться функциями бота.",
                                reply_markup=restart_button())
     except Exception as e:
         # Логируем ошибку, если что-то пошло не так
         print(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
+
+
 @dp.message_handler(commands=['stat'])
 async def send_statistics(message: types.Message):
-    user_id = message.from_user.id  # Получаем ID пользователя, отправившего команду
+    user_id = message.from_user.id
 
-    # Проверяем, есть ли пользователь в списке администраторов
     if user_id not in ADMIN_IDS:
         await message.reply("Извините, у вас нет доступа к этой команде.")
         return
 
     async with aiosqlite.connect('my_database.db') as db:
-        # Получаем количество объявлений в каждом городе
-        async with db.execute("SELECT city_id, COUNT(*) as count FROM advertisements GROUP BY city_id") as cursor:
-            rows = await cursor.fetchall()
+        # Получаем уникальные city_id из таблицы объявлений
+        cursor = await db.execute("SELECT DISTINCT city_id FROM advertisements")
+        ad_cities = await cursor.fetchall()
 
-        # Проверяем, есть ли результаты
-        if rows:
-            message_text = "Количество объявлений по городам:\n" + "\n".join([f"{row[0]}: {row[1]}" for row in rows])
-            await message.reply(message_text)
-        else:
-            await message.reply("В базе данных пока нет объявлений.")
+        # Получаем уникальные city_id из таблицы действий пользователей
+        cursor = await db.execute("SELECT DISTINCT city_id FROM view_actions")
+        view_cities = await cursor.fetchall()
+
+        # Создаём список уникальных city_id
+        unique_cities = set([city[0] for city in ad_cities] + [city[0] for city in view_cities])
+
+        stats_message = "Статистика по городам:\n"
+
+        for city_id in unique_cities:
+            # Получаем количество объявлений для города
+            cursor = await db.execute("SELECT COUNT(*) FROM advertisements WHERE city_id=?", (city_id,))
+            ad_count = await cursor.fetchone()
+            ad_count = ad_count[0] if ad_count else 0
+
+            # Получаем количество уникальных просмотров для города
+            cursor = await db.execute("SELECT COUNT(DISTINCT user_id) FROM view_actions WHERE city_id=?", (city_id,))
+            view_count = await cursor.fetchone()
+            view_count = view_count[0] if view_count else 0
+
+            stats_message += f"Город {city_id}: Объявлений - {ad_count}, Просмотров - {view_count}\n"
+
+    if len(unique_cities) > 0:
+        await message.reply(stats_message)
+    else:
+        await message.reply("В базе данных пока нет информации.")
+
 
 @dp.message_handler(commands=['start'], state="*")
 async def send_welcome(message: types.Message):
-
     user_id = message.from_user.id
     await update_last_activity(user_id)
     username = message.from_user.username  # Получаем username пользователя
-    await register_user_if_not_exists(user_id,username)
+    await register_user_if_not_exists(user_id, username)
     if await is_user_blocked(user_id):
         await message.reply("Извините, ваш аккаунт заблокирован.")
         return
@@ -202,7 +224,10 @@ async def send_welcome(message: types.Message):
 
     # Отправка картинки с кнопками в одном сообщении
     with open('main.jpg', 'rb') as photo:
-        await message.answer_photo(photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.",reply_markup=keyboard)
+        await message.answer_photo(photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.",
+                                   reply_markup=keyboard)
+
+
 async def is_user_blocked(user_id: int) -> bool:
     async with aiosqlite.connect('my_database.db') as db:
         async with db.execute("SELECT is_blocked FROM users WHERE id = ?", (user_id,)) as cursor:
@@ -210,6 +235,8 @@ async def is_user_blocked(user_id: int) -> bool:
             if result and result[0] == 1:
                 return True
     return False
+
+
 @dp.callback_query_handler(lambda c: c.data == 'continue', state="*")
 async def main(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
@@ -218,6 +245,7 @@ async def main(callback_query: types.CallbackQuery):
     # Отправляем сообщение с инструкциями или информацией
     await callback_query.message.answer("Для начала выберите город", reply_markup=generate_main_menu_markup())
     # Добавляем реплай кнопку "Главное меню"
+
 
 @dp.message_handler(commands=['delete'], state="*")
 async def start_delete_ad(message: types.Message):
@@ -228,6 +256,8 @@ async def start_delete_ad(message: types.Message):
 
     await UserState.DeleteAd.set()
     await message.reply("Пожалуйста, введите ID объявления, которое вы хотите удалить:")
+
+
 @dp.message_handler(state=UserState.DeleteAd)
 async def delete_ad(message: types.Message, state: FSMContext):
     ad_id = message.text.strip()
@@ -274,12 +304,14 @@ async def back_to_main_menu(message: types.Message, state: FSMContext):
     # Обновляем ID последнего сообщения с меню
     await state.update_data(last_menu_message_id=sent_message.message_id)
 
+
 def generate_main_menu_markup():
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("Выбрать город", callback_data="select_city"))
-    #markup.add(types.InlineKeyboardButton("Подписка", callback_data="oplata"))
+    # markup.add(types.InlineKeyboardButton("Подписка", callback_data="oplata"))
     # Добавьте другие кнопки по мере необходимости
     return markup
+
 
 async def generate_city_selection_markup():
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -338,51 +370,70 @@ async def cancel_adding_city(callback_query: types.CallbackQuery, state: FSMCont
     # Отправляем подтверждение об отмене
     await bot.send_message(callback_query.from_user.id, "Добавление города отменено.")
 
+
 def generate_delete_keyboard():
     markup = types.InlineKeyboardMarkup()
     delete_button = types.InlineKeyboardButton("скрыть", callback_data="delete_message")
     markup.add(delete_button)
     return markup
+
+
 def generate_back_to_main_markup():
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("Назад", callback_data="back_to_main"))
     return markup
+
+
 def generate_skip_button():
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("Пропустить", callback_data="skip_photos"))
     return markup
+
+
 def generate_oplata_button():
     markup = types.InlineKeyboardMarkup()
     delete_button = types.InlineKeyboardButton("скрыть", callback_data="delete_message")
     markup.add(types.InlineKeyboardButton("Купить подписку", callback_data="buy"))
     return markup
+
+
 def generate_done_button():
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("Завершить создание", callback_data="done_z"))
     return markup
+
+
 def city_again():
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("Посмотреть другие объявления", callback_data="sityagain"))
     return markup
+
+
 def generate_reply_keyboard():
     # Создаем реплай клавиатуру с кнопкой "Главное меню"
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     keyboard.add(KeyboardButton("Главное меню"))
     return keyboard
+
+
 def generate_clear_chat_button1():
     markup = InlineKeyboardMarkup()
     cancel_button = InlineKeyboardButton("Отменить", callback_data="cancel_complaint")
     markup.add(cancel_button)
     return markup
+
+
 def generate_cancel_button():
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("Отменить", callback_data="cancel_support"))
     return markup
 
+
 def generate_cancel_support_button():
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("Завершить диалог", callback_data="cancel_support"))
     return markup
+
 
 def generate_action_keyboard_with_back():
     markup = types.InlineKeyboardMarkup()
@@ -391,9 +442,10 @@ def generate_action_keyboard_with_back():
     markup.row(types.InlineKeyboardButton("Моё обьявление", callback_data="my_ad"),
                types.InlineKeyboardButton("Жалобы и предложения", callback_data="complaint_start"))
     markup.row(types.InlineKeyboardButton("Поддержка", callback_data="pod"),
-               #types.InlineKeyboardButton("Подписка", callback_data="oplata"))
-                types.InlineKeyboardButton("Выбрать другой город", callback_data="back_to_city_selection"))
+               # types.InlineKeyboardButton("Подписка", callback_data="oplata"))
+               types.InlineKeyboardButton("Выбрать другой город", callback_data="back_to_city_selection"))
     return markup
+
 
 @dp.callback_query_handler(lambda c: c.data == "cancel_complaint", state=UserState.Complaint)
 async def cancel_complaint(callback_query: types.CallbackQuery, state: FSMContext):
@@ -402,6 +454,7 @@ async def cancel_complaint(callback_query: types.CallbackQuery, state: FSMContex
     await bot.delete_message(callback_query.message.chat.id, callback_query.message.message_id)
     await bot.answer_callback_query(callback_query.id, "Жалоба отменена.")
     await bot.send_message(callback_query.from_user.id, "Вы вернулись в основное меню.")
+
 
 @dp.callback_query_handler(lambda c: c.data == "pod", state="*")
 async def start_support_session(callback_query: types.CallbackQuery, state: FSMContext):
@@ -415,12 +468,13 @@ async def start_support_session(callback_query: types.CallbackQuery, state: FSMC
         await clear_chat(user_id, callback_query.message.message_id)
     else:
         await UserState.SupportSession.set()
-        await state.update_data(user_id=callback_query.from_user.id)  # Сохраняем ID пользователя для последующего ответа
+        await state.update_data(
+            user_id=callback_query.from_user.id)  # Сохраняем ID пользователя для последующего ответа
         await bot.send_message(
-        callback_query.from_user.id,
-        "Пожалуйста, напишите ваш вопрос, и наш сотрудник свяжется с вами!\n\nЕсли вы передумали и хотите прекратить действие,\n\nОбязательно нажмите кнопку отменить, прежде чем переходить к другим командам",
-        reply_markup=generate_cancel_button()
-    )
+            callback_query.from_user.id,
+            "Пожалуйста, напишите ваш вопрос, и наш сотрудник свяжется с вами!\n\nЕсли вы передумали и хотите прекратить действие,\n\nОбязательно нажмите кнопку отменить, прежде чем переходить к другим командам",
+            reply_markup=generate_cancel_button()
+        )
 
 
 @dp.callback_query_handler(lambda c: c.data == "cancel_support", state=UserState.SupportSession)
@@ -457,9 +511,6 @@ async def handle_user_question(message: types.Message, state: FSMContext):
     await bot.send_message(support_staff_id, forward_message, reply_markup=markup)
 
 
-
-
-
 @dp.callback_query_handler(lambda c: c.data.startswith('reply_'), state="*")
 async def initiate_reply(callback_query: types.CallbackQuery, state: FSMContext):
     _, user_id, username = callback_query.data.split('_')
@@ -480,7 +531,9 @@ async def send_reply_to_user(message: types.Message, state: FSMContext):
     await bot.send_message(reply_to_user_id, message.text)
 
     # Отправляем сообщение с кнопкой для завершения диалога
-    sent_message = await bot.send_message(reply_to_user_id, "Ваш вопрос был отвечен.\n\nЕсли хотите завершить диалог, обязательно нажмите кнопку ниже.", reply_markup=generate_cancel_support_button())
+    sent_message = await bot.send_message(reply_to_user_id,
+                                          "Ваш вопрос был отвечен.\n\nЕсли хотите завершить диалог, обязательно нажмите кнопку ниже.",
+                                          reply_markup=generate_cancel_support_button())
 
     # Обновляем ID последнего сообщения с кнопкой в состоянии пользователя
     await state.update_data(last_cancel_button_message_id=sent_message.message_id)
@@ -499,8 +552,11 @@ async def start_complaint(callback_query: types.CallbackQuery):
     await track_user_action(user_id)  # Отслеживаем активность пользователя
     await UserState.Complaint.set()
     await bot.send_message(callback_query.from_user.id, "Пожалуйста, опишите вашу проблему или предложение.\n\n"
-        "Если вы хотите пожаловаться на пользователя, укажите его имя в формате @имя.\n"
-        "\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку отменить, прежде чем переходить к другим командам",reply_markup=generate_clear_chat_button1())
+                                                        "Если вы хотите пожаловаться на пользователя, укажите его имя в формате @имя.\n"
+                                                        "\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку отменить, прежде чем переходить к другим командам",
+                           reply_markup=generate_clear_chat_button1())
+
+
 @dp.message_handler(state=UserState.Complaint)
 async def handle_complaint(message: types.Message, state: FSMContext):
     channel_id = -1002025346514  # ID вашего канала для жалоб
@@ -529,8 +585,10 @@ async def handle_complaint(message: types.Message, state: FSMContext):
     user_mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
     channel_message = f"Пользователь {user_mention} ({message.from_user.id}) отправил следующее сообщение:\n\n{complaint_text}"
     await bot.send_message(channel_id, channel_message)
-    await message.reply("Ваше сообщение отправлено, спасибо за обратную связь!", reply_markup=generate_clear_chat_button())
+    await message.reply("Ваше сообщение отправлено, спасибо за обратную связь!",
+                        reply_markup=generate_clear_chat_button())
     await state.finish()
+
 
 def generate_clear_chat_button():
     markup = InlineKeyboardMarkup()
@@ -543,6 +601,7 @@ async def city_exists(city_name: str) -> bool:
     async with aiosqlite.connect('my_database.db') as db:
         async with db.execute("SELECT EXISTS(SELECT 1 FROM cities WHERE name = ? LIMIT 1)", (city_name,)) as cursor:
             return (await cursor.fetchone())[0] == 1
+
 
 @dp.callback_query_handler(lambda c: c.data.startswith("confirm_city"))
 async def confirm_city(callback_query: types.CallbackQuery):
@@ -563,7 +622,8 @@ async def confirm_city(callback_query: types.CallbackQuery):
             await db.commit()
         await bot.answer_callback_query(callback_query.id, f"Город {city_name} добавлен.")
         # Отправляем уведомление пользователю, предложившему город
-        await bot.send_message(user_id, f"Ваш предложенный город {city_name} был успешно добавлен. Нажмите /menu, чтобы посмотреть его в списке.")
+        await bot.send_message(user_id,
+                               f"Ваш предложенный город {city_name} был успешно добавлен. Нажмите /menu, чтобы посмотреть его в списке.")
         # Отправляем уведомление в канал для администратора
         channel_id = -1002025346514  # Убедитесь, что здесь правильный ID вашего канала
         await bot.send_message(channel_id, f"Администратор подтвердил добавление города: {city_name}.")
@@ -581,6 +641,7 @@ async def process_callback_delete_message(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     await track_user_action(user_id)  # Отслеживаем активность пользователя
     await bot.delete_message(chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
+
 
 @dp.message_handler(state=UserState.AddCity)
 async def add_city(message: types.Message, state: FSMContext):
@@ -603,7 +664,9 @@ async def add_city(message: types.Message, state: FSMContext):
         [InlineKeyboardButton(text="Отклонить", callback_data=f"cancel_city_{message.from_user.id}")]
     ])
     try:
-        await bot.send_message(channel_id, f"Пользователь @{message.from_user.username} предложил добавить город: {city_name}", reply_markup=markup)
+        await bot.send_message(channel_id,
+                               f"Пользователь @{message.from_user.username} предложил добавить город: {city_name}",
+                               reply_markup=markup)
         await message.reply("Ваше предложение отправлено на рассмотрение.")
     except Exception as e:
         await message.reply("Произошла ошибка при отправке предложения.")
@@ -652,6 +715,7 @@ async def delete_city(message: types.Message, state: FSMContext):
 async def back_to_main(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text("Главное меню:", reply_markup=generate_main_menu_markup())
 
+
 @dp.callback_query_handler(text="select_city")
 async def select_city(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
@@ -660,6 +724,7 @@ async def select_city(callback_query: types.CallbackQuery):
     # Используем await для асинхронного получения InlineKeyboardMarkup
     markup = await generate_city_selection_markup()
     await callback_query.message.edit_text("Выберите город:", reply_markup=markup)
+
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('city_'), state='*')
 async def process_city_selection(callback_query: types.CallbackQuery, state: FSMContext):
@@ -677,6 +742,7 @@ async def process_city_selection(callback_query: types.CallbackQuery, state: FSM
     markup = generate_action_keyboard_with_back()
     await callback_query.message.edit_text(f"Вы выбрали город: {city}.", reply_markup=markup)
     logger.info("Сообщение с выбором города отправлено.")
+
 
 @dp.callback_query_handler(lambda c: c.data == 'sityagain', state='*')
 async def select_city_again(callback_query: types.CallbackQuery, state: FSMContext):
@@ -712,9 +778,6 @@ async def select_city_again(callback_query: types.CallbackQuery, state: FSMConte
             logger.error(f"Не удалось удалить сообщение объявления: {e}")
 
 
-
-
-
 @dp.callback_query_handler(lambda c: c.data == 'back_to_city_selection', state='*')
 async def back_to_city_selection(callback_query: types.CallbackQuery, state: FSMContext):
     # Используем await для асинхронного получения InlineKeyboardMarkup
@@ -736,7 +799,7 @@ async def my_ad(callback_query: types.CallbackQuery, state: FSMContext):
         await bot.send_message(user_id, "У вас пока нет созданных объявлений.")
         return
 
-    ad_id, description, contact, photos,city = ad
+    ad_id, description, contact, photos, city = ad
     message_text = f"Ваше объявление:\nID: {ad_id}\nОписание: {description}\nКонтакт: {contact}\nВ Городе: {city}"
 
     # Проверяем наличие фотографий в объявлении
@@ -752,7 +815,6 @@ async def my_ad(callback_query: types.CallbackQuery, state: FSMContext):
                 await bot.send_photo(user_id, photo)
     else:
         await bot.send_message(user_id, message_text, reply_markup=generate_delete_keyboard())
-
 
 
 async def delete_previous_messages(state: FSMContext, chat_id: int):
@@ -817,7 +879,6 @@ async def create_ad(callback_query: types.CallbackQuery, state: FSMContext):
     await UserState.AdDescription.set()
 
 
-
 def compile_forbidden_words_regex(words_list):
     # Экранируем специальные символы в словах и объединяем их в одно большое регулярное выражение
     escaped_words = [re.escape(word) for word in words_list]
@@ -844,6 +905,7 @@ def filter_description(description):
 
     return description.strip()  # Удаляем начальные и конечные пробелы
 
+
 # Обработка введенного описания объявления
 @dp.message_handler(state=UserState.AdDescription)
 async def process_ad_description(message: types.Message, state: FSMContext):
@@ -862,6 +924,7 @@ async def process_ad_description(message: types.Message, state: FSMContext):
         # Переводим пользователя к следующему шагу
         await UserState.WaitForContact.set()
         await message.answer("Введите контактную информацию:")
+
 
 @dp.message_handler(state=UserState.WaitForContact)
 async def process_contact_info(message: types.Message, state: FSMContext):
@@ -887,6 +950,7 @@ async def add_photo_handler(callback_query: types.CallbackQuery):
 
     await bot.send_message(callback_query.from_user.id, "Пожалуйста, отправьте фотографию.", reply_markup=markup)
 
+
 # Обработка полученной фотографии
 @dp.message_handler(content_types=types.ContentType.PHOTO, state=UserState.WaitForPhotos)
 async def process_photos(message: types.Message, state: FSMContext):
@@ -903,13 +967,15 @@ async def process_photos(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['photo'] = photo_path
 
-    await message.answer("Фотография добавлена. нажмите чтобы закончить.",reply_markup=generate_done_button())
+    await message.answer("Фотография добавлена. нажмите чтобы закончить.", reply_markup=generate_done_button())
+
 
 async def fetch_cities():
     async with aiosqlite.connect('my_database.db') as db:
         cursor = await db.execute("SELECT name FROM cities ORDER BY name ASC")
         cities = await cursor.fetchall()
         return [city[0] for city in cities]
+
 
 @dp.callback_query_handler(lambda c: c.data == 'skip_photo', state=UserState.AskForPhoto)
 async def skip_photo_handler(callback_query: types.CallbackQuery, state: FSMContext):
@@ -931,10 +997,12 @@ async def delete_ad_after_duration(ad_id, duration_in_seconds=60):
             connection.close()
     print(f"Объявление с ID {ad_id} удалено из базы данных")
 
+
 @dp.callback_query_handler(lambda c: c.data == 'skip_photo', state=UserState.WaitForPhotos)
 async def skip_photo_handler(callback_query: types.CallbackQuery, state: FSMContext):
     # Переход к завершению добавления объявления или к следующему шагу в зависимости от вашей логики
     await done_add(callback_query, state)
+
 
 @dp.callback_query_handler(lambda c: c.data == 'done_z', state=UserState.WaitForPhotos)
 async def done_add(callback_query: types.CallbackQuery, state: FSMContext):
@@ -990,7 +1058,10 @@ async def done_add(callback_query: types.CallbackQuery, state: FSMContext):
 
     # Завершаем текущее состояние
     await state.finish()
+
+
 logging.basicConfig(level=logging.INFO)
+
 
 # Глобальный обработчик для выхода из процесса создания объявлений
 @dp.callback_query_handler(lambda c: True,
@@ -1004,30 +1075,46 @@ async def global_exit_handler(callback_query: types.CallbackQuery, state: FSMCon
         # Если callback_data не из списка разрешенных, завершаем состояние и сбрасываем данные
         await state.finish()  # Завершаем текущее состояние
         await callback_query.message.answer("Процесс создания объявления прерван. Ваши данные очищены.\n\n"
-            "Пожалуйста, нажмите снова на кнопку, на которую хотели нажать, или начните процесс создания объявления заново.")
+                                            "Пожалуйста, нажмите снова на кнопку, на которую хотели нажать, или начните процесс создания объявления заново.")
+
 
 @dp.callback_query_handler(lambda c: c.data == 'view_ads', state='*')
 async def view_ads(callback_query: types.CallbackQuery, state: FSMContext):
     await bot.answer_callback_query(callback_query.id)
     await update_last_activity(callback_query.from_user.id)
+
     state_data = await state.get_data()
-    city = state_data.get('city')
+    city = state_data.get('city')  # Используем 'city' для извлечения данных о городе
+
+    if city is None:
+        # Это сообщение можно удалить или заменить на другую логику, если 'city' всегда должен быть установлен
+        await bot.send_message(callback_query.from_user.id, "Ошибка: город не выбран.")
+        return
+
+    # Теперь добавим запись в таблицу view_actions для статистики просмотров
     async with aiosqlite.connect('my_database.db') as db:
-        cursor = await db.execute("SELECT id, description, contact, photos FROM advertisements WHERE city_id=? ORDER BY RANDOM()", (city,))
+        # Вставляем информацию о просмотре в базу данных
+        # Предполагается, что city уже содержит city_id. Если нет, необходимо получить city_id из city.
+        await db.execute("INSERT INTO view_actions (user_id, city_id) VALUES (?, ?)",
+                         (callback_query.from_user.id, city))
+        await db.commit()
+
+        # Получаем объявления для выбранного города
+        cursor = await db.execute(
+            "SELECT id, description, contact, photos FROM advertisements WHERE city_id=? ORDER BY RANDOM()", (city,))
         ads = await cursor.fetchall()
 
     if not ads:
-        # Если в выбранном городе нет объявлений
         await bot.send_message(
             callback_query.from_user.id,
-            "В данном городе пока нет доступных объявлений.Разместите объявление первым!!!\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам",
-            reply_markup=generate_clear_chat_button()  # Предоставляем кнопку "Назад" для возврата к предыдущему выбору
+            "В данном городе пока нет доступных объявлений. Разместите объявление первым!!!\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам",
+            reply_markup=generate_clear_chat_button()
         )
-        return  # Останавливаем выполнение функции, чтобы не продолжать с send_ads_batch
+        return
 
-    # Если есть объявления, продолжаем как обычно
     await state.set_data({'ads': ads, 'current_ad_index': 0})
     await send_ads_batch(callback_query.from_user.id, state)
+
 
 async def show_ad(user_id, ad, state: FSMContext):
     ad_id, description, contact, photos = ad
@@ -1037,7 +1124,8 @@ async def show_ad(user_id, ad, state: FSMContext):
             subscription_status = await cursor.fetchone()
 
     # Если подписка активна, показываем контакт, иначе - сообщение о необходимости подписки
-    contact_info = contact if subscription_status and subscription_status[0] == 1 else "для просмотра контактов, необходимо\nприобрести подписку."
+    contact_info = contact if subscription_status and subscription_status[
+        0] == 1 else "для просмотра контактов, необходимо\nприобрести подписку."
 
     message_text = f"Объявление ID: {ad_id}\nОписание: {description}\nКонтакт: {contact_info}"
 
@@ -1058,12 +1146,14 @@ async def show_ad(user_id, ad, state: FSMContext):
             message = await bot.send_message(user_id, "Проблема с загрузкой изображения.")
     else:
         message = await bot.send_message(user_id, message_text)
+
+
 async def send_ads_batch(user_id, state: FSMContext):
     await update_last_activity(user_id)
     user_data = await state.get_data()
     ads = user_data['ads']
     current_ad_index = user_data['current_ad_index']
-    ads_to_send = ads[current_ad_index:current_ad_index+20]
+    ads_to_send = ads[current_ad_index:current_ad_index + 20]
 
     for ad in ads_to_send:
         await show_ad(user_id, ad, state)
@@ -1077,9 +1167,13 @@ async def send_ads_batch(user_id, state: FSMContext):
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("Показать ещё", callback_data="next_ad"))
         await bot.send_message(user_id, "Показать следующие объявления?", reply_markup=markup)
-        await bot.send_message(user_id, "Нажмите назад чтобы вернуться в меню", reply_markup=generate_clear_chat_button())
+        await bot.send_message(user_id, "Нажмите назад чтобы вернуться в меню",
+                               reply_markup=generate_clear_chat_button())
     else:
-        await bot.send_message(user_id, "Вы просмотрели все доступные объявления в этом городе.\n\nЕсли вы передумали и хотите прекратить действие,\nОбязательно нажмите кнопку назад, прежде чем переходить к другим командам", reply_markup=generate_clear_chat_button())
+        await bot.send_message(user_id,
+                               "Вы просмотрели все доступные объявления в этом городе.\n\nЕсли вы передумали и хотите прекратить действие,\nОбязательно нажмите кнопку назад, прежде чем переходить к другим командам",
+                               reply_markup=generate_clear_chat_button())
+
 
 @dp.callback_query_handler(lambda c: c.data == 'next_ad', state='*')
 async def next_ad(callback_query: types.CallbackQuery, state: FSMContext):
@@ -1099,6 +1193,7 @@ async def next_ad(callback_query: types.CallbackQuery, state: FSMContext):
 
     # Продолжаем показ объявлений с текущего индекса
     await send_ads_batch(callback_query.from_user.id, state)
+
 
 @dp.callback_query_handler(lambda c: c.data == 'oplata', state='*')
 async def view_ads(callback_query: types.CallbackQuery, state: FSMContext):
@@ -1130,6 +1225,8 @@ async def message_not_modified_handler(update: types.Update, exception: MessageN
         logging.error(f"Error sending 'return to main menu' message: {e}")
 
     return True
+
+
 @dp.callback_query_handler(lambda c: c.data == 'clear_chat')
 async def clear_chat_callback(callback_query: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(row_width=2)
@@ -1139,7 +1236,8 @@ async def clear_chat_callback(callback_query: types.CallbackQuery):
     keyboard.add(button_subscribe, button_continue)
     user_id = callback_query.from_user.id
     with open('main.jpg', 'rb') as photo:
-        await bot.send_photo(user_id, photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.", reply_markup=keyboard)
+        await bot.send_photo(user_id, photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.",
+                             reply_markup=keyboard)
     message_id = callback_query.message.message_id
     start_message_id = message_id
     end_message_id = max(1, start_message_id - 100)  # Предположим, что 1000 — достаточный лимит
@@ -1152,6 +1250,7 @@ async def clear_chat_callback(callback_query: types.CallbackQuery):
         except (MessageToDeleteNotFound, MessageCantBeDeleted, BadRequest):
             # Пропустить ошибки удаления
             continue
+
 
 @dp.callback_query_handler(lambda c: c.data == 'clear_chat1')
 async def clear_chat_callback1(callback_query: types.CallbackQuery):
@@ -1163,7 +1262,8 @@ async def clear_chat_callback1(callback_query: types.CallbackQuery):
     keyboard.add(button_subscribe, button_continue)
     user_id = callback_query.from_user.id
     with open('main.jpg', 'rb') as photo:
-        await bot.send_photo(user_id, photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.", reply_markup=keyboard)
+        await bot.send_photo(user_id, photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.",
+                             reply_markup=keyboard)
     message_id = callback_query.message.message_id
     start_message_id = message_id
     end_message_id = max(1, start_message_id - 100)  # Предположим, что 1000 — достаточный лимит
@@ -1176,6 +1276,8 @@ async def clear_chat_callback1(callback_query: types.CallbackQuery):
         except (MessageToDeleteNotFound, MessageCantBeDeleted, BadRequest):
             # Пропустить ошибки удаления
             continue
+
+
 async def clear_chat(user_id, start_message_id):
     # Предположим, что мы хотим удалять сообщения начиная с start_message_id и до 100 сообщений назад
     end_message_id = max(1, start_message_id - 100)  # Устанавливаем предел в 100 сообщений назад
@@ -1259,8 +1361,6 @@ async def create_payment(user_id):
 
     }
 
-
-
     # Отправка запроса
     # Отправка запроса
     async with ClientSession() as session:
@@ -1310,8 +1410,6 @@ async def get_order_status(user_id):
                 return None
 
 
-
-
 @dp.callback_query_handler(lambda c: c.data == 'buy')
 async def process_buy_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
@@ -1349,10 +1447,10 @@ async def check_payment_callback(callback_query: types.CallbackQuery):
 
     if status_response and status_response.get("Success") and status_response.get("Status") == "CONFIRMED":
         await update_user_subscription(user_id, datetime.now(), 30)  # Предположим, подписка длится 30 дней
-        await bot.send_message(user_id, "Оплата прошла успешно. Ваша подписка активирована.", reply_markup=generate_clear_chat_button())
+        await bot.send_message(user_id, "Оплата прошла успешно. Ваша подписка активирована.",
+                               reply_markup=generate_clear_chat_button())
     else:
         await bot.send_message(user_id, "Оплата не прошла, попробуйте снова.")
-
 
 
 @dp.message_handler(commands=['subscription_status'])
@@ -1372,7 +1470,8 @@ async def subscription_status(message: types.Message):
                     days, remainder = divmod(remaining_time.total_seconds(), 86400)
                     hours, remainder = divmod(remainder, 3600)
                     minutes, seconds = divmod(remainder, 60)
-                    await message.reply(f"Ваша подписка активна. Осталось {int(days)} дней, {int(hours)} часов и {int(minutes)} минут.")
+                    await message.reply(
+                        f"Ваша подписка активна. Осталось {int(days)} дней, {int(hours)} часов и {int(minutes)} минут.")
                 else:
                     await message.reply("Ваша подписка истекла. Вы можете продлить её.")
             else:
@@ -1388,13 +1487,14 @@ async def reset_user_subscription(user_id: int):
     except Exception as e:
         print(f"Ошибка при сбросе подписки пользователя {user_id}: {e}")
 
+
 async def update_user_subscription(user_id: int, subscription_start: datetime, subscription_duration: int):
     try:
         subscription_end = subscription_start + timedelta(minutes=subscription_duration)
         async with aiosqlite.connect('my_database.db') as db:
             await db.execute("UPDATE users SET plus = 1, subscription_start = ?, subscription_end = ? WHERE id = ?",
-                            (subscription_start.strftime("%Y-%m-%d %H:%M:%S"),
-                            subscription_end.strftime("%Y-%m-%d %H:%M:%S"), user_id))
+                             (subscription_start.strftime("%Y-%m-%d %H:%M:%S"),
+                              subscription_end.strftime("%Y-%m-%d %H:%M:%S"), user_id))
             await db.commit()
 
         wait_seconds = (subscription_end - datetime.now()).total_seconds()
@@ -1407,6 +1507,8 @@ async def update_user_subscription(user_id: int, subscription_start: datetime, s
 async def sleep_and_reset(wait_seconds: int, user_id: int):
     await asyncio.sleep(wait_seconds)
     await reset_user_subscription(user_id)
+
+
 async def set_all_users_plus_status(status: int):
     try:
         async with aiosqlite.connect('my_database.db') as db:
@@ -1416,17 +1518,20 @@ async def set_all_users_plus_status(status: int):
     except Exception as e:
         print(f"Ошибка при обновлении статуса 'plus' всех пользователей: {e}")
 
+
 @dp.message_handler(commands=['krain8904'])
 async def change_plus_status(message: types.Message):
     command_params = message.get_args().split()
     if not command_params or command_params[0] not in ['1', '0']:
-        await message.reply("Пожалуйста, укажите корректный статус: 1 (активировать) или 0 (деактивировать). Например: /status 1")
+        await message.reply(
+            "Пожалуйста, укажите корректный статус: 1 (активировать) или 0 (деактивировать). Например: /status 1")
         return
 
     new_status = int(command_params[0])
 
     await set_all_users_plus_status(new_status)
     await message.reply(f"Статус 'plus' для всех пользователей установлен на {new_status}.")
+
 
 @dp.message_handler(commands=['addadmin'])
 async def add_admin(message: types.Message):
@@ -1449,12 +1554,15 @@ async def add_admin(message: types.Message):
         ADMIN_IDS.append(user_id_to_add)
         await message.reply(f"Пользователь с ID {user_id_to_add} теперь администратор.")
 
+
 user_actions = defaultdict(list)
+
 
 async def track_user_action(user_id):
     now = datetime.now()
     user_actions[user_id].append(now)
-    user_actions[user_id] = [action_time for action_time in user_actions[user_id] if now - action_time < timedelta(minutes=1)]
+    user_actions[user_id] = [action_time for action_time in user_actions[user_id] if
+                             now - action_time < timedelta(minutes=1)]
     if len(user_actions[user_id]) > 4:
         await reset_user_state(user_id)
         user_actions[user_id].clear()
@@ -1465,7 +1573,10 @@ async def track_user_action(user_id):
 async def reset_user_state(user_id):
     # Сбрасываем состояние пользователя и предлагаем вернуться в главное меню
     await dp.current_state(user=user_id).reset_state()
-    await bot.send_message(user_id, "Вы совершили слишком много действий. Возвращаем вас в главное меню.",reply_markup=generate_main_menu_markup())
+    await bot.send_message(user_id, "Вы совершили слишком много действий. Возвращаем вас в главное меню.",
+                           reply_markup=generate_main_menu_markup())
+
+
 @dp.message_handler()
 async def echo(message: Message):
     await update_last_activity(message.from_user.id)
@@ -1498,7 +1609,9 @@ async def send_message_to_all_users():
                 button = types.InlineKeyboardButton(text="Перезапустить", callback_data="clear_chat1")
                 markup.add(button)
                 try:
-                    await bot.send_message(chat_id, "В боте произошло обновление. Чтобы воспользоваться новыми возможностями,\nпожалуйста, нажмите кнопку 'Перезапустить'.", reply_markup=markup)
+                    await bot.send_message(chat_id,
+                                           "В боте произошло обновление. Чтобы воспользоваться новыми возможностями,\nпожалуйста, нажмите кнопку 'Перезапустить'.",
+                                           reply_markup=markup)
                 except Exception as e:
                     # Проверяем, есть ли username для формирования ссылки на профиль
                     if username:
@@ -1507,9 +1620,11 @@ async def send_message_to_all_users():
                     else:
                         print(f"Не удалось отправить сообщение пользователю {chat_id} (пользователь без username): {e}")
 
+
 async def on_startup(_):
     asyncio.create_task(check_inactivity())
     asyncio.create_task(send_message_to_all_users())
+
 
 # Точка входа в программу
 if __name__ == '__main__':
