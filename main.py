@@ -10,10 +10,12 @@ import datetime
 
 import aiosqlite
 
+
 from datetime import datetime
 from datetime import timedelta
 
 from aiohttp import ClientSession
+from aiogram.types import InputFile
 
 from collections import defaultdict
 
@@ -80,8 +82,94 @@ class UserState(StatesGroup):
     SupportSession = State()
     AwaitReply = State()
     DeleteCity = State()
+    SearchAd = State()  # Новое состояние для поиска объявления
+    editing_description = State()  # Состояние для редактирования описания объявления
+    editing_contact = State()
 
 
+@dp.message_handler(commands=['search'], state="*")
+async def start_search(message: types.Message, state: FSMContext):
+    # Установка состояния для поиска объявления
+    await UserState.SearchAd.set()
+    await message.answer("Пожалуйста, введите ID объявления, которое вы хотите найти:")
+
+@dp.message_handler(state=UserState.SearchAd)
+async def search_ad(message: types.Message, state: FSMContext):
+    ad_id = message.text.strip()
+    if not ad_id.isdigit():
+        await message.answer("Пожалуйста, введите корректный числовой ID.")
+        return
+
+    async with aiosqlite.connect('my_database.db') as db:
+        cursor = await db.execute("SELECT id, user_id, city_id as city_name, description, contact, photos FROM advertisements WHERE id = ?", (ad_id,))
+        ad = await cursor.fetchone()
+        if ad:
+            description = f"ID: {ad[0]}\nПользователь: {ad[1]}\nГород: {ad[2] if ad[2] else 'Город не указан'}\nОписание: {ad[3]}\nКонтакт: {ad[4]}"
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("Редактировать", callback_data=f"edit_ad:{ad[0]}"))
+            if ad[5]:
+                photo_path = ad[5]
+                await message.answer_photo(InputFile(photo_path), caption=description, reply_markup=markup)
+            else:
+                await message.answer(description, reply_markup=markup)
+        else:
+            await message.answer("Объявление с таким ID не найдено.")
+    await state.finish()  # Завершение состояния после обработки поиска
+
+
+# Добавление кнопки для редактирования контактов в исходном интерфейсе
+@dp.callback_query_handler(lambda c: c.data.startswith("edit_ad"))
+async def edit_ad(callback_query: types.CallbackQuery):
+    ad_id = callback_query.data.split(':')[1]
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("Редактировать описание", callback_data=f"edit_desc:{ad_id}"))
+    markup.row(InlineKeyboardButton("Редактировать контакты", callback_data=f"edit_contacts:{ad_id}"))
+
+    await callback_query.message.edit_reply_markup(reply_markup=None)  # Убрать старую клавиатуру
+    await callback_query.message.reply("Что вы хотите отредактировать?", reply_markup=markup)
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("edit_desc"))
+async def request_new_description(callback_query: types.CallbackQuery):
+    ad_id = callback_query.data.split(':')[1]
+    await UserState.editing_description.set()  # Установка состояния для редактирования описания
+    async with dp.current_state(user=callback_query.from_user.id).proxy() as data:
+        data['ad_id'] = ad_id  # Сохранение ad_id в состояние
+    await callback_query.message.answer("Введите новое описание объявления:")
+
+@dp.message_handler(state=UserState.editing_description)
+async def update_description(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        ad_id = data['ad_id']
+
+    new_description = message.text.strip()
+    async with aiosqlite.connect('my_database.db') as db:
+        await db.execute("UPDATE advertisements SET description = ? WHERE id = ?", (new_description, ad_id))
+        await db.commit()
+
+    await message.answer("Описание объявления обновлено.")
+    await state.finish()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("edit_contacts"))
+async def request_new_contact(callback_query: types.CallbackQuery):
+    ad_id = callback_query.data.split(':')[1]
+    await UserState.editing_contact.set()  # Установка состояния для редактирования контактной информации
+    async with dp.current_state(user=callback_query.from_user.id).proxy() as data:
+        data['ad_id'] = ad_id  # Сохранение ad_id в состояние
+    await callback_query.message.answer("Введите новую контактную информацию объявления:")
+
+@dp.message_handler(state=UserState.editing_contact)
+async def update_contact(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        ad_id = data['ad_id']
+
+    new_contact = message.text.strip()
+    async with aiosqlite.connect('my_database.db') as db:
+        await db.execute("UPDATE advertisements SET contact = ? WHERE id = ?", (new_contact, ad_id))
+        await db.commit()
+
+    await message.answer("Контактная информация объявления обновлена.")
+    await state.finish()
 async def register_user_if_not_exists(user_id: int, username: str = None):
     async with aiosqlite.connect('my_database.db') as db:
         # Проверяем, существует ли пользователь в базе данных
@@ -199,7 +287,7 @@ async def send_statistics(message: types.Message):
             view_count = await cursor.fetchone()
             view_count = view_count[0] if view_count else 0
 
-            stats_message += f"Город {city_id}: Объявлений - {ad_count}, Просмотров - {view_count}\n"
+            stats_message += f"Город {city_id}:\nОбъявлений - {ad_count},\nПросмотров - {view_count}\n\n"
 
     if len(unique_cities) > 0:
         await message.reply(stats_message)
@@ -210,21 +298,30 @@ async def send_statistics(message: types.Message):
 @dp.message_handler(commands=['start'], state="*")
 async def send_welcome(message: types.Message):
     user_id = message.from_user.id
-    await update_last_activity(user_id)
     username = message.from_user.username  # Получаем username пользователя
+    first_name = message.from_user.first_name  # Получаем имя пользователя
+
+    await update_last_activity(user_id)
     await register_user_if_not_exists(user_id, username)
+
     if await is_user_blocked(user_id):
         await message.reply("Извините, ваш аккаунт заблокирован.")
         return
+
     keyboard = InlineKeyboardMarkup(row_width=2)
     button_subscribe = InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")
-    button_continue = InlineKeyboardButton(text="Продолжить", callback_data='continue')
-
+    button_continue = InlineKeyboardButton(text="Продолжить➡️", callback_data='continue')
     keyboard.add(button_subscribe, button_continue)
 
-    # Отправка картинки с кнопками в одном сообщении
+    # Добавление имени пользователя в приветственное сообщение
+    welcome_text = f"Добро пожаловать в бот, {first_name}!\nВыберите, пожалуйста, действие."
+
+    # Информационное сообщение о том, что делать если бот завис
+    additional_info = "\n\n⚙️Если бот завис, пожалуйста, нажмите menu/start."
+
+    # Отправка картинки с кнопками и текстом в одном сообщении
     with open('main.jpg', 'rb') as photo:
-        await message.answer_photo(photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.",
+        await message.answer_photo(photo, caption=f"{welcome_text}\n{additional_info}",
                                    reply_markup=keyboard)
 
 
@@ -347,7 +444,7 @@ async def generate_city_selection_markup():
 async def add_city_callback(callback_query: types.CallbackQuery):
     # Создаем Inline клавиатуру с кнопкой "Отменить"
     cancel_markup = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("Отменить", callback_data='cancel_adding_city')
+        InlineKeyboardButton("Отменить ❌", callback_data='cancel_adding_city')
     )
 
     # Переводим пользователя в состояние добавления города
@@ -380,7 +477,7 @@ def generate_delete_keyboard():
 
 def generate_back_to_main_markup():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("Назад", callback_data="back_to_main"))
+    markup.add(types.InlineKeyboardButton("⬅️Назад", callback_data="back_to_main"))
     return markup
 
 
@@ -418,14 +515,14 @@ def generate_reply_keyboard():
 
 def generate_clear_chat_button1():
     markup = InlineKeyboardMarkup()
-    cancel_button = InlineKeyboardButton("Отменить", callback_data="cancel_complaint")
+    cancel_button = InlineKeyboardButton("Отменить ❌", callback_data="cancel_complaint")
     markup.add(cancel_button)
     return markup
 
 
 def generate_cancel_button():
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("Отменить", callback_data="cancel_support"))
+    markup.add(InlineKeyboardButton("Отменить ❌", callback_data="cancel_support"))
     return markup
 
 
@@ -592,7 +689,7 @@ async def handle_complaint(message: types.Message, state: FSMContext):
 
 def generate_clear_chat_button():
     markup = InlineKeyboardMarkup()
-    clear_button = InlineKeyboardButton("Назад", callback_data="clear_chat")
+    clear_button = InlineKeyboardButton("⬅️Назад", callback_data="clear_chat")
     markup.add(clear_button)
     return markup
 
@@ -629,11 +726,6 @@ async def confirm_city(callback_query: types.CallbackQuery):
         await bot.send_message(channel_id, f"Администратор подтвердил добавление города: {city_name}.")
 
 
-@dp.callback_query_handler(lambda c: c.data == "cancel_city")
-async def cancel_city(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id, "Предложение отклонено.")
-    # Опционально: отправляйте уведомление пользователю, предложившему город
-
 
 # Обработчик для кнопки удаления
 @dp.callback_query_handler(lambda c: c.data == 'delete_message')
@@ -641,6 +733,8 @@ async def process_callback_delete_message(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     await track_user_action(user_id)  # Отслеживаем активность пользователя
     await bot.delete_message(chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
+
+
 
 
 @dp.message_handler(state=UserState.AddCity)
@@ -661,18 +755,38 @@ async def add_city(message: types.Message, state: FSMContext):
     channel_id = -1002025346514  # ID вашего канала
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Подтвердить", callback_data=f"confirm_city:{city_name}:{message.from_user.id}")],
-        [InlineKeyboardButton(text="Отклонить", callback_data=f"cancel_city_{message.from_user.id}")]
+        [InlineKeyboardButton(text="Отклонить", callback_data=f"reject_city:{city_name}:{message.from_user.id}")]
     ])
     try:
         await bot.send_message(channel_id,
                                f"Пользователь @{message.from_user.username} предложил добавить город: {city_name}",
                                reply_markup=markup)
         await message.reply("Ваше предложение отправлено на рассмотрение.")
+
+        # Устанавливаем флаг, что предложение о добавлении города было отправлено
+        async with state.proxy() as data:
+            data['city_proposed'] = True
+
     except Exception as e:
         await message.reply("Произошла ошибка при отправке предложения.")
         logger.error(f"Ошибка при отправке сообщения в канал: {e}")
     finally:
         await state.finish()  # Завершаем состояние после обработки
+
+@dp.callback_query_handler(lambda c: c.data.startswith("reject_city"))
+async def reject_city(callback_query: types.CallbackQuery):
+    print(f"Callback data received: {callback_query.data}")  # Для логирования
+    try:
+        _, city_name, user_id_str = callback_query.data.split(":", 2)
+        user_id = int(user_id_str)  # Преобразование строки в число
+    except ValueError as e:
+        print(f"Error splitting callback data: {e}")  # Логирование ошибки
+        await callback_query.answer("Произошла ошибка при обработке вашего запроса.")
+        return  # Выход из функции для предотвращения ошибок
+
+    await bot.answer_callback_query(callback_query.id, f"Город {city_name} отклонен.")
+    await bot.send_message(user_id, f"Ваше предложение добавить город '{city_name}' было отклонено.\n\nВозможно город был написан с ошибкой\nили его не существует, попробуйте ещё раз")
+
 
 
 @dp.message_handler(commands=['delete_city'], state='*')
@@ -948,7 +1062,7 @@ async def add_photo_handler(callback_query: types.CallbackQuery):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("Пропустить", callback_data="skip_photo"))
 
-    await bot.send_message(callback_query.from_user.id, "Пожалуйста, отправьте фотографию.", reply_markup=markup)
+    await bot.send_message(callback_query.from_user.id, "Пожалуйста, отправьте фотографию.")
 
 
 # Обработка полученной фотографии
@@ -979,86 +1093,114 @@ async def fetch_cities():
 
 @dp.callback_query_handler(lambda c: c.data == 'skip_photo', state=UserState.AskForPhoto)
 async def skip_photo_handler(callback_query: types.CallbackQuery, state: FSMContext):
-    await done_add(callback_query, state)  # Переход к завершению добавления объявления
+    # Переход к состоянию ожидания подтверждения фото
+    await UserState.WaitForPhotos.set()
 
+    # Создаем кнопку завершения процесса
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("Закончить", callback_data="done_z"))
 
-async def delete_ad_after_duration(ad_id, duration_in_seconds=60):
-    await asyncio.sleep(duration_in_seconds)
-    connection = None  # Инициализируем переменную заранее
-    try:
-        connection = sqlite3.connect('my_database.db')
-        cursor = connection.cursor()
-        cursor.execute("DELETE FROM advertisements WHERE id=?", (ad_id,))
-        connection.commit()
-    except Exception as e:
-        print(f"Ошибка при удалении объявления с ID {ad_id}: {e}")
-    finally:
-        if connection:  # Проверяем, что соединение было успешно открыто
-            connection.close()
-    print(f"Объявление с ID {ad_id} удалено из базы данных")
+    await callback_query.message.answer("Фотография не добавлена. Нажмите кнопку 'Закончить', чтобы завершить.", reply_markup=markup)
 
+    async with state.proxy() as data:
+        if 'description' not in data or 'contact' not in data:
+            logging.error("Некоторые необходимые данные отсутствуют.")
+            await callback_query.message.answer("Произошла ошибка, некоторые данные отсутствуют. Пожалуйста, начните процесс заново.")
+            await state.finish()
+            return
 
-@dp.callback_query_handler(lambda c: c.data == 'skip_photo', state=UserState.WaitForPhotos)
-async def skip_photo_handler(callback_query: types.CallbackQuery, state: FSMContext):
-    # Переход к завершению добавления объявления или к следующему шагу в зависимости от вашей логики
-    await done_add(callback_query, state)
 
 
 @dp.callback_query_handler(lambda c: c.data == 'done_z', state=UserState.WaitForPhotos)
-async def done_add(callback_query: types.CallbackQuery, state: FSMContext):
-    # Получаем данные из состояния
+async def request_confirmation(callback_query: types.CallbackQuery, state: FSMContext):
+
     async with state.proxy() as data:
-        city = data['city']
-        user_id = data.get('user_id')
-        description = data['description']
-        contact = data['contact']
-        photos = data.get('photo', [])
+        # Создание инлайн клавиатуры
+        confirmation_keyboard = InlineKeyboardMarkup(row_width=2)
+        confirmation_keyboard.add(
+            InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no")
+        )
+        await show_advertisement(callback_query.from_user.id, data)
+        # Отправка сообщения с запросом на подтверждение
+        await bot.send_message(
+            callback_query.from_user.id,
+            "Вы уверены, что хотите опубликовать это объявление?",
+            reply_markup=confirmation_keyboard
+        )
+
+
+
+async def show_advertisement(user_id, data):
+    city = data['city']
+    description = data['description']
+    contact = data['contact']
+    photos = data.get('photo', [])
+
+    message_text = f"Описание: {description}\nКонтакт: {contact}\nВ городе: {city}"
+
+    if photos:
+        # Если есть фото, отправляем его вместе с сообщением
+        photo_path = photos[0] if isinstance(photos, list) else photos
+        with open(photo_path, 'rb') as photo:
+            await bot.send_photo(user_id, photo=photo, caption=message_text)
+    else:
+        await bot.send_message(user_id, message_text)
+
+
+@dp.callback_query_handler(lambda c: c.data == 'confirm_yes', state=UserState.WaitForPhotos)
+async def done_add(callback_query: types.CallbackQuery, state: FSMContext):
+    async with state.proxy() as data:
+        user_id = callback_query.from_user.id  # Убедитесь, что user_id берется из callback_query, если он не сохранен в state
+        city = data.get('city')
+        description = data.get('description')
+        contact = data.get('contact')
+        photos = data.get('photo', None)  # Это должно возвращать None, если фото нет
+
+    if not all([city, description, contact]):
+        await bot.send_message(user_id, "Некоторые данные отсутствуют. Пожалуйста, начните процесс заново.")
+        await state.finish()
+        return
 
     async with aiosqlite.connect('my_database.db') as db:
-        # Определяем количество объявлений в базе
-        async with db.execute("SELECT COUNT(*) FROM advertisements") as cursor:
-            ads_count = (await cursor.fetchone())[0]
+        cursor = await db.execute("SELECT COUNT(*) FROM advertisements")
+        ads_count = await cursor.fetchone()
+        ads_count = ads_count[0] if ads_count else 0
 
-        expiration_duration = timedelta(days=14)  # Стандартный срок
-        if ads_count < 500:  # Если объявлений меньше 500, устанавливаем срок в 2 месяца
-            expiration_duration = timedelta(days=60)
-
+        expiration_duration = timedelta(days=120 if ads_count < 500 else 14)
         expiration_date = datetime.now() + expiration_duration
+
+        photo_entry = ','.join(photos) if photos and isinstance(photos, list) else photos
+
         try:
-            # Вставляем новое объявление в базу данных с датой истечения срока
-            cursor = await db.execute('''
-                    INSERT INTO advertisements (user_id, city_id, description, contact, photos, published_at, expiration_date) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (user_id, city, description, contact, ','.join(photos) if isinstance(photos, list) else photos,
-                      datetime.now(), expiration_date))
+            cursor = await db.execute(
+                'INSERT INTO advertisements (user_id, city_id, description, contact, photos, published_at, expiration_date) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (user_id, city, description, contact, photo_entry, datetime.now(), expiration_date))
             await db.commit()
 
             ad_id = cursor.lastrowid  # Получаем ID только что вставленного объявления
-
-            # Сообщаем пользователю о размещении объявления
-
-            message_text = f"Ваше объявление с ID {ad_id}\n\nОписание: {description}\nКонтакт: {contact}\nВ городе: {city}"
-
-            if photos:
-                # Если у вас есть путь к фото, отправляем его как фото
-                photo_path = photos[0] if isinstance(photos, list) else photos
-                with open(photo_path, 'rb') as photo:
-                    await bot.send_photo(callback_query.from_user.id, photo=photo, caption=message_text)
-            else:
-                await bot.send_message(callback_query.from_user.id, message_text)
-
-            await bot.send_message(callback_query.from_user.id,
-                                   f"Срок размещения объявления 14 дней, удачи в поисках!\n\nОбязательно нажмите кнопку назад, прежде чем переходить к другим командам",
-                                   reply_markup=generate_clear_chat_button())
-
-        except sqlite3.DatabaseError as e:
-            await bot.send_message(callback_query.from_user.id, f"Произошла ошибка при сохранении объявления: {e}")
+            await bot.send_message(user_id, f"Ваше объявление опубликовано, удачи в поисках!\n\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам", reply_markup=generate_clear_chat_button())
+        except Exception as e:
+            logging.error(f"Ошибка при сохранении объявления: {e}")
+            await bot.send_message(user_id, f"Произошла ошибка при сохранении объявления: {e}")
         finally:
             await db.close()
 
-    # Завершаем текущее состояние
     await state.finish()
 
+
+@dp.callback_query_handler(lambda c: c.data == 'confirm_no', state=UserState.WaitForPhotos)
+async def confirm_no_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    # Отправить сообщение о том, что объявление не опубликовано
+    await bot.send_message(
+        callback_query.from_user.id,
+        "Вы отменили публикацию объявления. Нажмите кнопку назад, чтобы вернуться к другим командам.",
+        reply_markup=generate_clear_chat_button()
+    )
+
+    # Завершение текущего состояния
+    await state.finish()
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1229,18 +1371,27 @@ async def message_not_modified_handler(update: types.Update, exception: MessageN
 
 @dp.callback_query_handler(lambda c: c.data == 'clear_chat')
 async def clear_chat_callback(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    username = callback_query.from_user.username  # Получаем username пользователя
+    first_name = callback_query.from_user.first_name  # Получаем имя пользователя
+
     keyboard = InlineKeyboardMarkup(row_width=2)
     button_subscribe = InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")
-    button_continue = InlineKeyboardButton(text="Продолжить", callback_data='continue')
-
+    button_continue = InlineKeyboardButton(text="Продолжить➡️", callback_data='continue')
     keyboard.add(button_subscribe, button_continue)
-    user_id = callback_query.from_user.id
+
+    # Добавление имени пользователя и информационного сообщения в приветственный текст
+    welcome_text = f"Добро пожаловать в бот, {first_name}!\nВыберите, пожалуйста, действие."
+    additional_info = "\n\n⚙️Если бот завис, пожалуйста, нажмите menu/start."
+
     with open('main.jpg', 'rb') as photo:
-        await bot.send_photo(user_id, photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.",
+        await bot.send_photo(user_id, photo, caption=f"{welcome_text}\n{additional_info}",
                              reply_markup=keyboard)
+
+    # Попытка удалить сообщения в чате
     message_id = callback_query.message.message_id
     start_message_id = message_id
-    end_message_id = max(1, start_message_id - 100)  # Предположим, что 1000 — достаточный лимит
+    end_message_id = max(1, start_message_id - 100)  # Ограничение на количество удаляемых сообщений
     deleted_count = 0
 
     for msg_id in range(start_message_id, end_message_id, -1):
@@ -1253,20 +1404,28 @@ async def clear_chat_callback(callback_query: types.CallbackQuery):
 
 
 @dp.callback_query_handler(lambda c: c.data == 'clear_chat1')
-async def clear_chat_callback1(callback_query: types.CallbackQuery):
-    await update_last_activity(callback_query.from_user.id)
+async def clear_chat_callback(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    username = callback_query.from_user.username  # Получаем username пользователя
+    first_name = callback_query.from_user.first_name  # Получаем имя пользователя
+
     keyboard = InlineKeyboardMarkup(row_width=2)
     button_subscribe = InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")
-    button_continue = InlineKeyboardButton(text="Продолжить", callback_data='continue')
-
+    button_continue = InlineKeyboardButton(text="Продолжить➡️", callback_data='continue')
     keyboard.add(button_subscribe, button_continue)
-    user_id = callback_query.from_user.id
+
+    # Добавление имени пользователя и информационного сообщения в приветственный текст
+    welcome_text = f"Добро пожаловать в бот, {first_name}!\nВыберите, пожалуйста, действие."
+    additional_info = "\n\n⚙️Если бот завис, пожалуйста, нажмите menu/start."
+
     with open('main.jpg', 'rb') as photo:
-        await bot.send_photo(user_id, photo, caption="Добро пожаловать в бота. Выберите, пожалуйста, действие.",
+        await bot.send_photo(user_id, photo, caption=f"{welcome_text}\n{additional_info}",
                              reply_markup=keyboard)
+
+    # Попытка удалить сообщения в чате
     message_id = callback_query.message.message_id
     start_message_id = message_id
-    end_message_id = max(1, start_message_id - 100)  # Предположим, что 1000 — достаточный лимит
+    end_message_id = max(1, start_message_id - 100)  # Ограничение на количество удаляемых сообщений
     deleted_count = 0
 
     for msg_id in range(start_message_id, end_message_id, -1):
@@ -1592,7 +1751,7 @@ async def handle_callback_query(callback_query: CallbackQuery):
 
     # Отправляем сообщение с уведомлением и кнопкой перезапуска
     await bot.send_message(user_id,
-                           "Вы были неактивны в течение последних 6 часов.\nНажмите на кнопку перезапустить ниже\nчтобы продолжить пользоваться функциями бота.",
+                           "Вы были неактивны в течение последних 16 часов.\nНажмите на кнопку перезапустить ниже\nчтобы продолжить пользоваться функциями бота.",
                            reply_markup=restart_button())
 
     # Не забудьте уведомить Telegram, что callback был обработан
@@ -1619,6 +1778,24 @@ async def send_message_to_all_users():
                         print(f"Не удалось отправить сообщение пользователю {chat_id} ({user_link}): {e}")
                     else:
                         print(f"Не удалось отправить сообщение пользователю {chat_id} (пользователь без username): {e}")
+
+async def delete_ad_after_duration(ad_id, duration_in_seconds=60):
+    await asyncio.sleep(duration_in_seconds)
+    connection = None  # Инициализируем переменную заранее
+    try:
+        connection = sqlite3.connect('my_database.db')
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM advertisements WHERE id=?", (ad_id,))
+        connection.commit()
+    except Exception as e:
+        print(f"Ошибка при удалении объявления с ID {ad_id}: {e}")
+    finally:
+        if connection:  # Проверяем, что соединение было успешно открыто
+            connection.close()
+    print(f"Объявление с ID {ad_id} удалено из базы данных")
+
+
+
 
 
 async def on_startup(_):
