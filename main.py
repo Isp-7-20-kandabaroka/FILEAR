@@ -34,6 +34,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.dispatcher.filters.state import State, StatesGroup
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.exceptions import ChatNotFound
 from aiogram.utils.exceptions import MessageToDeleteNotFound, MessageCantBeDeleted, BadRequest
 
 from aiogram.types import Message
@@ -229,7 +230,7 @@ async def check_inactivity():
                     await send_notification(user_id)
 
             # Ждем перед следующей проверкой
-            await asyncio.sleep(57600)
+            await asyncio.sleep(86400)
         except Exception as e:
             # Логируем любые ошибки и продолжаем цикл
             print(f"Ошибка при проверке неактивности: {e}")
@@ -308,10 +309,19 @@ async def send_welcome(message: types.Message):
         await message.reply("Извините, ваш аккаунт заблокирован.")
         return
 
+    try:
+        # Проверка на подписку пользователя на канал
+        chat_member = await bot.get_chat_member(chat_id="-1002070177606", user_id=user_id)
+        if chat_member.status not in ['member', 'administrator', 'creator']:
+            raise ValueError("User not a member")
+    except (ChatNotFound, ValueError):
+        # Пользователь не подписан на канал или канал не найден
+        await message.reply("Пожалуйста, подпишитесь на наш канал, чтобы продолжить использование бота\nЕсли вы подписались нажмите -> /start", reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")))
+        return
+
     keyboard = InlineKeyboardMarkup(row_width=2)
-    button_subscribe = InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")
     button_continue = InlineKeyboardButton(text="Продолжить➡️", callback_data='continue')
-    keyboard.add(button_subscribe, button_continue)
+    keyboard.add(button_continue)
 
     # Добавление имени пользователя в приветственное сообщение
     welcome_text = f"Добро пожаловать в бот, {first_name}!\nВыберите, пожалуйста, действие."
@@ -323,6 +333,7 @@ async def send_welcome(message: types.Message):
     with open('main.jpg', 'rb') as photo:
         await message.answer_photo(photo, caption=f"{welcome_text}\n{additional_info}",
                                    reply_markup=keyboard)
+
 
 
 async def is_user_blocked(user_id: int) -> bool:
@@ -954,7 +965,21 @@ async def delete_previous_messages(state: FSMContext, chat_id: int):
 async def create_ad(callback_query: types.CallbackQuery, state: FSMContext):
     chat_id = callback_query.message.chat.id
     user_id = callback_query.from_user.id
-    await update_last_activity(callback_query.from_user.id)
+    await update_last_activity(user_id)
+
+    try:
+        # Проверка на подписку пользователя на канал
+        chat_member = await bot.get_chat_member(chat_id="-1002070177606", user_id=user_id)
+        if chat_member.status not in ['member', 'administrator', 'creator']:
+            await callback_query.message.reply(
+                "Пожалуйста, подпишитесь на наш канал, чтобы продолжить использование бота\nЕсли вы подписались нажмите -> /start",
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")))
+            return
+    except ChatNotFound:
+        await callback_query.message.reply("Произошла ошибка при проверке подписки на канал.")
+        return
+
     # Вызываем track_user_action до любых действий, чтобы проверить, не является ли поведение пользователя спамом
     need_to_clear_chat = await track_user_action(user_id)
     if need_to_clear_chat:
@@ -968,7 +993,6 @@ async def create_ad(callback_query: types.CallbackQuery, state: FSMContext):
             subscription_status = await cursor.fetchone()
 
     if subscription_status is None or subscription_status[0] == 0 and user_id not in ADMIN_IDS:
-        # Если подписка не активна и пользователь не является администратором, сообщаем пользователю
         await bot.send_message(chat_id,
                                "Извините, создавать объявления могут только пользователи с активной подпиской или администраторы.")
         return
@@ -977,18 +1001,15 @@ async def create_ad(callback_query: types.CallbackQuery, state: FSMContext):
     await delete_previous_messages(state, chat_id)
 
     if user_id not in ADMIN_IDS:
-        # Проверяем, есть ли уже созданное объявление у пользователя, если он не администратор
         async with aiosqlite.connect('my_database.db') as db:
             async with db.execute("SELECT COUNT(*) FROM advertisements WHERE user_id = ?", (user_id,)) as cursor:
                 count = await cursor.fetchone()
 
         if count and count[0] > 0:
-            # Если объявление уже существует, информируем пользователя
             await bot.send_message(chat_id,
                                    "Вы уже создали объявление. В данный момент разрешено создавать только одно объявление.")
             return
 
-    # Если объявления нет, или пользователь является администратором, устанавливаем начальное состояние процесса создания объявления
     await bot.send_message(chat_id, "Укажите краткую информацию о себе и вашем предложении:")
     await UserState.AdDescription.set()
 
@@ -1223,39 +1244,44 @@ async def global_exit_handler(callback_query: types.CallbackQuery, state: FSMCon
 @dp.callback_query_handler(lambda c: c.data == 'view_ads', state='*')
 async def view_ads(callback_query: types.CallbackQuery, state: FSMContext):
     await bot.answer_callback_query(callback_query.id)
-    await update_last_activity(callback_query.from_user.id)
+    user_id = callback_query.from_user.id
+
+    try:
+        # Проверка на подписку пользователя на канал
+        chat_member = await bot.get_chat_member(chat_id="-1001829270539", user_id=user_id)
+        if chat_member.status not in ['member', 'administrator', 'creator']:
+            await callback_query.message.reply("Пожалуйста, подпишитесь на наш канал, чтобы продолжить использование бота\nЕсли вы подписались нажмите -> /start",
+                                               reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")))
+            return
+    except ChatNotFound:
+        await callback_query.message.reply("Произошла ошибка при проверке подписки на канал.")
+        return
+
+    await update_last_activity(user_id)
 
     state_data = await state.get_data()
     city = state_data.get('city')  # Используем 'city' для извлечения данных о городе
 
     if city is None:
-        # Это сообщение можно удалить или заменить на другую логику, если 'city' всегда должен быть установлен
-        await bot.send_message(callback_query.from_user.id, "Ошибка: город не выбран.")
+        await bot.send_message(user_id, "Ошибка: город не выбран.")
         return
 
-    # Теперь добавим запись в таблицу view_actions для статистики просмотров
+    # Запись в базу данных для статистики просмотров
     async with aiosqlite.connect('my_database.db') as db:
-        # Вставляем информацию о просмотре в базу данных
-        # Предполагается, что city уже содержит city_id. Если нет, необходимо получить city_id из city.
-        await db.execute("INSERT INTO view_actions (user_id, city_id) VALUES (?, ?)",
-                         (callback_query.from_user.id, city))
+        await db.execute("INSERT INTO view_actions (user_id, city_id) VALUES (?, ?)", (user_id, city))
         await db.commit()
 
-        # Получаем объявления для выбранного города
+        # Получение объявлений для выбранного города
         cursor = await db.execute(
             "SELECT id, description, contact, photos FROM advertisements WHERE city_id=? ORDER BY RANDOM()", (city,))
         ads = await cursor.fetchall()
 
     if not ads:
-        await bot.send_message(
-            callback_query.from_user.id,
-            "В данном городе пока нет доступных объявлений. Разместите объявление первым!!!\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам",
-            reply_markup=generate_clear_chat_button()
-        )
+        await bot.send_message(user_id, "В данном городе пока нет доступных объявлений. Разместите объявление первым!!!\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам", reply_markup=generate_clear_chat_button())
         return
 
     await state.set_data({'ads': ads, 'current_ad_index': 0})
-    await send_ads_batch(callback_query.from_user.id, state)
+    await send_ads_batch(user_id, state)
 
 
 async def show_ad(user_id, ad, state: FSMContext):
@@ -1406,15 +1432,31 @@ async def clear_chat_callback(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == 'clear_chat1')
 async def clear_chat_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    username = callback_query.from_user.username  # Получаем username пользователя
-    first_name = callback_query.from_user.first_name  # Получаем имя пользователя
+    username = callback_query.from_user.username
+    first_name = callback_query.from_user.first_name
+
+    await update_last_activity(user_id)
+    await register_user_if_not_exists(user_id, username)
+
+    if await is_user_blocked(user_id):
+        await callback_query.answer("Извините, ваш аккаунт заблокирован.", show_alert=True)
+        return
+
+    try:
+        chat_member = await bot.get_chat_member(chat_id="-1002070177606", user_id=user_id)
+        if chat_member.status not in ['member', 'administrator', 'creator']:
+            raise ValueError("User not a member")
+    except (ChatNotFound, ValueError):
+        await callback_query.message.reply("Пожалуйста, подпишитесь на наш канал, чтобы продолжить использование бота\nЕсли вы подписались нажмите -> /start", reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU"),
+        ))
+        return
 
     keyboard = InlineKeyboardMarkup(row_width=2)
     button_subscribe = InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")
     button_continue = InlineKeyboardButton(text="Продолжить➡️", callback_data='continue')
     keyboard.add(button_subscribe, button_continue)
 
-    # Добавление имени пользователя и информационного сообщения в приветственный текст
     welcome_text = f"Добро пожаловать в бот, {first_name}!\nВыберите, пожалуйста, действие."
     additional_info = "\n\n⚙️Если бот завис, пожалуйста, нажмите menu/start."
 
@@ -1422,10 +1464,9 @@ async def clear_chat_callback(callback_query: types.CallbackQuery):
         await bot.send_photo(user_id, photo, caption=f"{welcome_text}\n{additional_info}",
                              reply_markup=keyboard)
 
-    # Попытка удалить сообщения в чате
     message_id = callback_query.message.message_id
     start_message_id = message_id
-    end_message_id = max(1, start_message_id - 100)  # Ограничение на количество удаляемых сообщений
+    end_message_id = max(1, start_message_id - 100)
     deleted_count = 0
 
     for msg_id in range(start_message_id, end_message_id, -1):
@@ -1433,7 +1474,6 @@ async def clear_chat_callback(callback_query: types.CallbackQuery):
             await bot.delete_message(user_id, msg_id)
             deleted_count += 1
         except (MessageToDeleteNotFound, MessageCantBeDeleted, BadRequest):
-            # Пропустить ошибки удаления
             continue
 
 
