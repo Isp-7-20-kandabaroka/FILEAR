@@ -83,9 +83,11 @@ class UserState(StatesGroup):
     SupportSession = State()
     AwaitReply = State()
     DeleteCity = State()
+
     SearchAd = State()  # Новое состояние для поиска объявления
     editing_description = State()  # Состояние для редактирования описания объявления
     editing_contact = State()
+    WaitingForPhotouser = State()
 
 
 @dp.message_handler(commands=['search'], state="*")
@@ -272,8 +274,15 @@ async def send_statistics(message: types.Message):
         cursor = await db.execute("SELECT DISTINCT city_id FROM view_actions")
         view_cities = await cursor.fetchall()
 
-        # Создаём список уникальных city_id
+        # Создаём множество уникальных city_id
         unique_cities = set([city[0] for city in ad_cities] + [city[0] for city in view_cities])
+
+        # Удаляем удаленные города из списка уникальных городов
+        # Для этого получаем список городов, которые остались в базе данных
+        cursor = await db.execute("SELECT name FROM cities")
+        remaining_cities = set([city[0] for city in await cursor.fetchall()])
+        # Удаляем из списка уникальных городов города, которые отсутствуют в базе данных
+        unique_cities = unique_cities.intersection(remaining_cities)
 
         stats_message = "Статистика по городам:\n"
 
@@ -799,7 +808,11 @@ async def reject_city(callback_query: types.CallbackQuery):
     await bot.send_message(user_id, f"Ваше предложение добавить город '{city_name}' было отклонено.\n\nВозможно город был написан с ошибкой\nили его не существует, попробуйте ещё раз")
 
 
-
+async def delete_city_from_database(city_name: str):
+    async with aiosqlite.connect('my_database.db') as db:
+        # Удаляем город из базы данных
+        await db.execute("DELETE FROM cities WHERE name = ?", (city_name,))
+        await db.commit()
 @dp.message_handler(commands=['delete_city'], state='*')
 async def start_delete_city(message: types.Message):
     user_id = message.from_user.id
@@ -829,16 +842,13 @@ async def delete_city(message: types.Message, state: FSMContext):
                 # Если город не найден
                 await message.reply("Город не найден.")
             else:
-                # Удаляем город из базы данных
-                await db.execute("DELETE FROM cities WHERE name = ?", (city_name,))
-                await db.commit()
+                await delete_city_from_database(city_name)  # Удаляем город из базы данных
                 await message.reply(f"Город {city_name} удален из базы данных.")
 
     await state.finish()  # Завершаем состояние после обработки
 
 
-async def back_to_main(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("Главное меню:", reply_markup=generate_main_menu_markup())
+
 
 
 @dp.callback_query_handler(text="select_city")
@@ -913,7 +923,8 @@ async def back_to_city_selection(callback_query: types.CallbackQuery, state: FSM
 @dp.callback_query_handler(text="my_ad", state="*")
 async def my_ad(callback_query: types.CallbackQuery, state: FSMContext):
     user_id = callback_query.from_user.id
-    await update_last_activity(callback_query.from_user.id)
+    await update_last_activity(user_id)
+
     connection = sqlite3.connect('my_database.db')
     cursor = connection.cursor()
     cursor.execute("SELECT id, description, contact, photos, city_id FROM advertisements WHERE user_id=?", (user_id,))
@@ -927,19 +938,69 @@ async def my_ad(callback_query: types.CallbackQuery, state: FSMContext):
     ad_id, description, contact, photos, city = ad
     message_text = f"Ваше объявление:\nID: {ad_id}\nОписание: {description}\nКонтакт: {contact}\nВ Городе: {city}"
 
+    # Создаем клавиатуру с кнопками "Добавить фото" и "Скрыть"
+    keyboard = InlineKeyboardMarkup()
+    keyboard.row(
+        InlineKeyboardButton("Добавить фото", callback_data=f"add_photo_{ad_id}"),
+        InlineKeyboardButton("Скрыть", callback_data="hide_ad")
+    )
+
     # Проверяем наличие фотографий в объявлении
     if photos:
         # Предполагаем, что `photos` хранит пути к фотографиям через запятую
         photos_list = photos.split(',')
         # Отправляем первую фотографию с текстом объявления
         with open(photos_list[0].strip(), 'rb') as photo:
-            await bot.send_photo(user_id, photo, caption=message_text, reply_markup=generate_delete_keyboard())
+            await bot.send_photo(user_id, photo, caption=message_text, reply_markup=keyboard)
         # Если есть дополнительные фотографии, отправляем их отдельными сообщениями
         for photo_path in photos_list[1:]:
             with open(photo_path.strip(), 'rb') as photo:
                 await bot.send_photo(user_id, photo)
     else:
-        await bot.send_message(user_id, message_text, reply_markup=generate_delete_keyboard())
+        await bot.send_message(user_id, message_text, reply_markup=keyboard)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith('add_photo_'))
+async def add_photo(callback_query: types.CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    ad_id = callback_query.data.split('_')[-1]
+
+    # Отправляем запрос пользователю на отправку фотографии
+    await bot.send_message(user_id, "Пожалуйста, отправьте новое фото для добавления к объявлению.")
+
+    # Устанавливаем состояние, чтобы ждать фотографии от пользователя
+    await UserState.WaitingForPhotouser.set()
+    await state.update_data(ad_id=ad_id)  # Сохраняем ad_id в состояние
+
+
+@dp.message_handler(content_types=types.ContentType.PHOTO, state=UserState.WaitingForPhotouser)
+async def process_photo(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    # Получаем ad_id из состояния
+    state_data = await state.get_data()
+    ad_id = state_data.get('ad_id')
+
+    # Проверяем, был ли ad_id передан
+    if not ad_id:
+        await bot.send_message(user_id, "Произошла ошибка. Попробуйте снова.")
+        return
+
+    # Получаем путь к папке img и формируем путь к файлу
+    img_folder = 'img'
+    photo_file = f"{user_id}_{ad_id}.jpg"
+    photo_path = os.path.join(img_folder, photo_file)
+
+    # Сохраняем фотографию в папку img
+    await message.photo[-1].download(photo_path)
+
+    # Обновляем запись в базе данных с путем к фотографии
+    async with aiosqlite.connect('my_database.db') as db:
+        await db.execute("UPDATE advertisements SET photos = ? WHERE id = ?", (photo_path, ad_id))
+        await db.commit()
+
+    await bot.send_message(user_id, "Фотография успешно добавлена к объявлению.")
+    await state.finish()  # Завершаем состояние ожидания фотографии
 
 
 async def delete_previous_messages(state: FSMContext, chat_id: int):
@@ -1244,39 +1305,44 @@ async def global_exit_handler(callback_query: types.CallbackQuery, state: FSMCon
 @dp.callback_query_handler(lambda c: c.data == 'view_ads', state='*')
 async def view_ads(callback_query: types.CallbackQuery, state: FSMContext):
     await bot.answer_callback_query(callback_query.id)
-    await update_last_activity(callback_query.from_user.id)
+    user_id = callback_query.from_user.id
+
+    try:
+        # Проверка на подписку пользователя на канал
+        chat_member = await bot.get_chat_member(chat_id="-1002070177606", user_id=user_id)
+        if chat_member.status not in ['member', 'administrator', 'creator']:
+            await callback_query.message.reply("Пожалуйста, подпишитесь на наш канал, чтобы продолжить использование бота.",
+                                               reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")))
+            return
+    except ChatNotFound:
+        await callback_query.message.reply("Произошла ошибка при проверке подписки на канал.")
+        return
+
+    await update_last_activity(user_id)
 
     state_data = await state.get_data()
     city = state_data.get('city')  # Используем 'city' для извлечения данных о городе
 
     if city is None:
-        # Это сообщение можно удалить или заменить на другую логику, если 'city' всегда должен быть установлен
-        await bot.send_message(callback_query.from_user.id, "Ошибка: город не выбран.")
+        await bot.send_message(user_id, "Ошибка: город не выбран.")
         return
 
-    # Теперь добавим запись в таблицу view_actions для статистики просмотров
+    # Запись в базу данных для статистики просмотров
     async with aiosqlite.connect('my_database.db') as db:
-        # Вставляем информацию о просмотре в базу данных
-        # Предполагается, что city уже содержит city_id. Если нет, необходимо получить city_id из city.
-        await db.execute("INSERT INTO view_actions (user_id, city_id) VALUES (?, ?)",
-                         (callback_query.from_user.id, city))
+        await db.execute("INSERT INTO view_actions (user_id, city_id) VALUES (?, ?)", (user_id, city))
         await db.commit()
 
-        # Получаем объявления для выбранного города
+        # Получение объявлений для выбранного города
         cursor = await db.execute(
             "SELECT id, description, contact, photos FROM advertisements WHERE city_id=? ORDER BY RANDOM()", (city,))
         ads = await cursor.fetchall()
 
     if not ads:
-        await bot.send_message(
-            callback_query.from_user.id,
-            "В данном городе пока нет доступных объявлений. Разместите объявление первым!!!\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам",
-            reply_markup=generate_clear_chat_button()
-        )
+        await bot.send_message(user_id, "В данном городе пока нет доступных объявлений. Разместите объявление первым!!!\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам", reply_markup=generate_clear_chat_button())
         return
 
     await state.set_data({'ads': ads, 'current_ad_index': 0})
-    await send_ads_batch(callback_query.from_user.id, state)
+    await send_ads_batch(user_id, state)
 
 
 async def show_ad(user_id, ad, state: FSMContext):
@@ -1287,8 +1353,7 @@ async def show_ad(user_id, ad, state: FSMContext):
             subscription_status = await cursor.fetchone()
 
     # Если подписка активна, показываем контакт, иначе - сообщение о необходимости подписки
-    contact_info = contact if subscription_status and subscription_status[
-        0] == 1 else "для просмотра контактов, необходимо\nприобрести подписку."
+    contact_info = contact if subscription_status and subscription_status[0] == 1 else "для просмотра контактов, необходимо\nприобрести подписку."
 
     message_text = f"Объявление ID: {ad_id}\nОписание: {description}\nКонтакт: {contact_info}"
 
@@ -1303,10 +1368,14 @@ async def show_ad(user_id, ad, state: FSMContext):
         photo_ids = photos.split(', ')
         photo_path = photo_ids[0].strip()
         if os.path.exists(photo_path):
-            with open(photo_path, 'rb') as photo_file:
-                message = await bot.send_photo(user_id, photo_file, caption=message_text)
+            try:
+                with open(photo_path, 'rb') as photo_file:
+                    message = await bot.send_photo(user_id, photo_file, caption=message_text)
+            except Exception as e:
+                print("Ошибка при отправке фотографии:", e)
+                message = await bot.send_message(user_id, message_text)
         else:
-            message = await bot.send_message(user_id, "Проблема с загрузкой изображения.")
+            message = await bot.send_message(user_id, message_text)
     else:
         message = await bot.send_message(user_id, message_text)
 
