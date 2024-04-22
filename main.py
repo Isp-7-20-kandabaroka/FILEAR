@@ -1248,7 +1248,7 @@ async def view_ads(callback_query: types.CallbackQuery, state: FSMContext):
 
     try:
         # Проверка на подписку пользователя на канал
-        chat_member = await bot.get_chat_member(chat_id="-1001829270539", user_id=user_id)
+        chat_member = await bot.get_chat_member(chat_id="-1002070177606", user_id=user_id)
         if chat_member.status not in ['member', 'administrator', 'creator']:
             await callback_query.message.reply("Пожалуйста, подпишитесь на наш канал, чтобы продолжить использование бота\nЕсли вы подписались нажмите -> /start",
                                                reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")))
