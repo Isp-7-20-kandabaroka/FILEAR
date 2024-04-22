@@ -1244,44 +1244,39 @@ async def global_exit_handler(callback_query: types.CallbackQuery, state: FSMCon
 @dp.callback_query_handler(lambda c: c.data == 'view_ads', state='*')
 async def view_ads(callback_query: types.CallbackQuery, state: FSMContext):
     await bot.answer_callback_query(callback_query.id)
-    user_id = callback_query.from_user.id
-
-    try:
-        # Проверка на подписку пользователя на канал
-        chat_member = await bot.get_chat_member(chat_id="-1002070177606", user_id=user_id)
-        if chat_member.status not in ['member', 'administrator', 'creator']:
-            await callback_query.message.reply("Пожалуйста, подпишитесь на наш канал, чтобы продолжить использование бота\nЕсли вы подписались нажмите -> /start",
-                                               reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton(text="Подписаться", url="https://t.me/SOVMESTNAYA_ARENDA_RU")))
-            return
-    except ChatNotFound:
-        await callback_query.message.reply("Произошла ошибка при проверке подписки на канал.")
-        return
-
-    await update_last_activity(user_id)
+    await update_last_activity(callback_query.from_user.id)
 
     state_data = await state.get_data()
     city = state_data.get('city')  # Используем 'city' для извлечения данных о городе
 
     if city is None:
-        await bot.send_message(user_id, "Ошибка: город не выбран.")
+        # Это сообщение можно удалить или заменить на другую логику, если 'city' всегда должен быть установлен
+        await bot.send_message(callback_query.from_user.id, "Ошибка: город не выбран.")
         return
 
-    # Запись в базу данных для статистики просмотров
+    # Теперь добавим запись в таблицу view_actions для статистики просмотров
     async with aiosqlite.connect('my_database.db') as db:
-        await db.execute("INSERT INTO view_actions (user_id, city_id) VALUES (?, ?)", (user_id, city))
+        # Вставляем информацию о просмотре в базу данных
+        # Предполагается, что city уже содержит city_id. Если нет, необходимо получить city_id из city.
+        await db.execute("INSERT INTO view_actions (user_id, city_id) VALUES (?, ?)",
+                         (callback_query.from_user.id, city))
         await db.commit()
 
-        # Получение объявлений для выбранного города
+        # Получаем объявления для выбранного города
         cursor = await db.execute(
             "SELECT id, description, contact, photos FROM advertisements WHERE city_id=? ORDER BY RANDOM()", (city,))
         ads = await cursor.fetchall()
 
     if not ads:
-        await bot.send_message(user_id, "В данном городе пока нет доступных объявлений. Разместите объявление первым!!!\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам", reply_markup=generate_clear_chat_button())
+        await bot.send_message(
+            callback_query.from_user.id,
+            "В данном городе пока нет доступных объявлений. Разместите объявление первым!!!\n\nЕсли вы передумали и хотите прекратить действие,\nобязательно нажмите кнопку назад, прежде чем переходить к другим командам",
+            reply_markup=generate_clear_chat_button()
+        )
         return
 
     await state.set_data({'ads': ads, 'current_ad_index': 0})
-    await send_ads_batch(user_id, state)
+    await send_ads_batch(callback_query.from_user.id, state)
 
 
 async def show_ad(user_id, ad, state: FSMContext):
