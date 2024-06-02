@@ -19,7 +19,7 @@ from aiogram.types import InputFile
 
 from collections import defaultdict
 
-from aiogram.types import CallbackQuery
+
 from aiogram.dispatcher import FSMContext
 
 from forbidden_words import forbidden_words_list
@@ -66,7 +66,7 @@ bot = Bot(token='6669399410:AAHWkE80Jqix61KmaXW-TQzqYw6bMZaFuhE')
 dp = Dispatcher(bot, storage=storage)
 
 CHANNEL_ID = -1002025346514
-ADMIN_IDS = [487242878,713476634]  # Замените на реальные ID администраторов
+ADMIN_IDS = [487242878, 713476634]  # Замените на реальные ID администраторов
 
 
 class UserState(StatesGroup):
@@ -91,10 +91,11 @@ class UserState(StatesGroup):
 
 
 @dp.message_handler(commands=['search'], state="*")
-async def start_search(message: types.Message, state: FSMContext):
+async def start_search(message: types.Message):
     # Установка состояния для поиска объявления
     await UserState.SearchAd.set()
     await message.answer("Пожалуйста, введите ID объявления, которое вы хотите найти:")
+
 
 @dp.message_handler(state=UserState.SearchAd)
 async def search_ad(message: types.Message, state: FSMContext):
@@ -132,6 +133,7 @@ async def edit_ad(callback_query: types.CallbackQuery):
     await callback_query.message.reply("Что вы хотите отредактировать?", reply_markup=markup)
     await callback_query.answer()
 
+
 @dp.callback_query_handler(lambda c: c.data.startswith("edit_desc"))
 async def request_new_description(callback_query: types.CallbackQuery):
     ad_id = callback_query.data.split(':')[1]
@@ -139,6 +141,7 @@ async def request_new_description(callback_query: types.CallbackQuery):
     async with dp.current_state(user=callback_query.from_user.id).proxy() as data:
         data['ad_id'] = ad_id  # Сохранение ad_id в состояние
     await callback_query.message.answer("Введите новое описание объявления:")
+
 
 @dp.message_handler(state=UserState.editing_description)
 async def update_description(message: types.Message, state: FSMContext):
@@ -153,6 +156,7 @@ async def update_description(message: types.Message, state: FSMContext):
     await message.answer("Описание объявления обновлено.")
     await state.finish()
 
+
 @dp.callback_query_handler(lambda c: c.data.startswith("edit_contacts"))
 async def request_new_contact(callback_query: types.CallbackQuery):
     ad_id = callback_query.data.split(':')[1]
@@ -160,6 +164,7 @@ async def request_new_contact(callback_query: types.CallbackQuery):
     async with dp.current_state(user=callback_query.from_user.id).proxy() as data:
         data['ad_id'] = ad_id  # Сохранение ad_id в состояние
     await callback_query.message.answer("Введите новую контактную информацию объявления:")
+
 
 @dp.message_handler(state=UserState.editing_contact)
 async def update_contact(message: types.Message, state: FSMContext):
@@ -173,6 +178,7 @@ async def update_contact(message: types.Message, state: FSMContext):
 
     await message.answer("Контактная информация объявления обновлена.")
     await state.finish()
+
 async def register_user_if_not_exists(user_id: int, username: str = None):
     async with aiosqlite.connect('my_database.db') as db:
         # Проверяем, существует ли пользователь в базе данных
@@ -192,7 +198,6 @@ async def register_user_if_not_exists(user_id: int, username: str = None):
 
                 await bot.send_message(CHANNEL_ID, message_text, parse_mode=types.ParseMode.MARKDOWN)
 
-
 async def check_and_block_user_if_needed(user_id: int):
     async with aiosqlite.connect('my_database.db') as db:
         # Инкрементируем счётчик жалоб
@@ -209,52 +214,12 @@ async def check_and_block_user_if_needed(user_id: int):
         return False  # Возвращаем False, если количество жалоб меньше 3
 
 
-async def update_last_activity(user_id: int):
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # Форматируем текущее время как строку
-    async with aiosqlite.connect('my_database.db') as db:
-        await db.execute("UPDATE users SET last_activity = ? WHERE id = ?", (now, user_id))
-        await db.commit()
-
-
-async def check_inactivity():
-    while True:
-        try:
-            now = datetime.now()
-            time_threshold = now - timedelta(seconds=3600)
-
-            async with aiosqlite.connect('my_database.db') as db:
-                # Выполняем запрос для поиска неактивных пользователей
-                async with db.execute("SELECT id FROM users WHERE last_activity < ?", (time_threshold,)) as cursor:
-                    inactive_users = await cursor.fetchall()
-
-                # Отправляем уведомления найденным пользователям
-                for user_id, in inactive_users:
-                    await send_notification(user_id)
-
-            # Ждем перед следующей проверкой
-            await asyncio.sleep(86400)
-        except Exception as e:
-            # Логируем любые ошибки и продолжаем цикл
-            print(f"Ошибка при проверке неактивности: {e}")
-
-
 def restart_button():
     # Создаем кнопку для перезапуска
     markup = InlineKeyboardMarkup()
     button = InlineKeyboardButton(text="Перезапустить", callback_data="clear_chat1")
     markup.add(button)
     return markup
-
-
-async def send_notification(user_id: int):
-    try:
-        # Используем user_id как chat_id для отправки сообщения
-        await bot.send_message(user_id,
-                               "Вы были неактивны в течение последних 16 часов.\nНажмите на кнопку перезапустить ниже\nчтобы продолжить пользоваться функциями бота.",
-                               reply_markup=restart_button())
-    except Exception as e:
-        # Логируем ошибку, если что-то пошло не так
-        print(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
 
 
 @dp.message_handler(commands=['stat'])
@@ -311,7 +276,7 @@ async def send_welcome(message: types.Message):
     username = message.from_user.username  # Получаем username пользователя
     first_name = message.from_user.first_name  # Получаем имя пользователя
 
-    await update_last_activity(user_id)
+
     await register_user_if_not_exists(user_id, username)
 
     if await is_user_blocked(user_id):
@@ -358,7 +323,7 @@ async def is_user_blocked(user_id: int) -> bool:
 async def main(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
     user_id = callback_query.from_user.id
-    await update_last_activity(callback_query.from_user.id)
+
     # Отправляем сообщение с инструкциями или информацией
     await callback_query.message.answer("Для начала выберите город", reply_markup=generate_main_menu_markup())
     # Добавляем реплай кнопку "Главное меню"
@@ -402,7 +367,7 @@ async def delete_ad(message: types.Message, state: FSMContext):
 @dp.message_handler(commands=['menu'], state="*")
 async def back_to_main_menu(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    await update_last_activity(message.from_user.id)
+
     user_id = message.from_user.id
     if await is_user_blocked(user_id):
         await message.reply("Извините, ваш аккаунт заблокирован.")
@@ -575,9 +540,9 @@ async def cancel_complaint(callback_query: types.CallbackQuery, state: FSMContex
 
 @dp.callback_query_handler(lambda c: c.data == "pod", state="*")
 async def start_support_session(callback_query: types.CallbackQuery, state: FSMContext):
-    await update_last_activity(callback_query.from_user.id)
+
     user_id = callback_query.from_user.id
-    await update_last_activity(user_id)
+
     # Вызываем track_user_action до любых действий, чтобы проверить, не является ли поведение пользователя спамом
     need_to_clear_chat = await track_user_action(user_id)
     if need_to_clear_chat:
@@ -665,7 +630,7 @@ async def send_reply_to_user(message: types.Message, state: FSMContext):
 @dp.callback_query_handler(lambda c: c.data == "complaint_start", state="*")
 async def start_complaint(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    await update_last_activity(callback_query.from_user.id)
+
     await track_user_action(user_id)  # Отслеживаем активность пользователя
     await UserState.Complaint.set()
     await bot.send_message(callback_query.from_user.id, "Пожалуйста, опишите вашу проблему или предложение.\n\n"
@@ -855,7 +820,7 @@ async def delete_city(message: types.Message, state: FSMContext):
 async def select_city(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
 
-    await update_last_activity(callback_query.from_user.id)
+
     # Используем await для асинхронного получения InlineKeyboardMarkup
     markup = await generate_city_selection_markup()
     await callback_query.message.edit_text("Выберите город:", reply_markup=markup)
@@ -864,7 +829,7 @@ async def select_city(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('city_'), state='*')
 async def process_city_selection(callback_query: types.CallbackQuery, state: FSMContext):
     user_id = callback_query.from_user.id
-    await update_last_activity(callback_query.from_user.id)
+
     city = callback_query.data.split('_')[1]
     await state.update_data(city=city, user_id=callback_query.from_user.id)
     logger.info(f"Город {city} выбран, обновление данных состояния.")
@@ -923,7 +888,7 @@ async def back_to_city_selection(callback_query: types.CallbackQuery, state: FSM
 @dp.callback_query_handler(text="my_ad", state="*")
 async def my_ad(callback_query: types.CallbackQuery, state: FSMContext):
     user_id = callback_query.from_user.id
-    await update_last_activity(user_id)
+
 
     connection = sqlite3.connect('my_database.db')
     cursor = connection.cursor()
@@ -1026,7 +991,7 @@ async def delete_previous_messages(state: FSMContext, chat_id: int):
 async def create_ad(callback_query: types.CallbackQuery, state: FSMContext):
     chat_id = callback_query.message.chat.id
     user_id = callback_query.from_user.id
-    await update_last_activity(user_id)
+
 
     try:
         # Проверка на подписку пользователя на канал
@@ -1318,7 +1283,7 @@ async def view_ads(callback_query: types.CallbackQuery, state: FSMContext):
         await callback_query.message.reply("Произошла ошибка при проверке подписки на канал.")
         return
 
-    await update_last_activity(user_id)
+
 
     state_data = await state.get_data()
     city = state_data.get('city')  # Используем 'city' для извлечения данных о городе
@@ -1381,7 +1346,7 @@ async def show_ad(user_id, ad, state: FSMContext):
 
 
 async def send_ads_batch(user_id, state: FSMContext):
-    await update_last_activity(user_id)
+
     user_data = await state.get_data()
     ads = user_data['ads']
     current_ad_index = user_data['current_ad_index']
@@ -1499,7 +1464,7 @@ async def clear_chat_callback(callback_query: types.CallbackQuery):
     username = callback_query.from_user.username
     first_name = callback_query.from_user.first_name
 
-    await update_last_activity(user_id)
+
     await register_user_if_not_exists(user_id, username)
 
     if await is_user_blocked(user_id):
@@ -1842,24 +1807,10 @@ async def reset_user_state(user_id):
 
 @dp.message_handler()
 async def echo(message: Message):
-    await update_last_activity(message.from_user.id)
     await message.answer(message.text)
 
 
-@dp.callback_query_handler()
-async def handle_callback_query(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
 
-    # Обновляем время последней активности пользователя
-    await update_last_activity(user_id)
-
-    # Отправляем сообщение с уведомлением и кнопкой перезапуска
-    await bot.send_message(user_id,
-                           "Вы были неактивны в течение последних 16 часов.\nНажмите на кнопку перезапустить ниже\nчтобы продолжить пользоваться функциями бота.",
-                           reply_markup=restart_button())
-
-    # Не забудьте уведомить Telegram, что callback был обработан
-    await bot.answer_callback_query(callback_query.id)
 
 
 async def send_message_to_all_users():
@@ -1903,7 +1854,7 @@ async def delete_ad_after_duration(ad_id, duration_in_seconds=60):
 
 
 async def on_startup(_):
-    asyncio.create_task(check_inactivity())
+
     asyncio.create_task(send_message_to_all_users())
 
 
